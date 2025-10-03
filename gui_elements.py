@@ -99,11 +99,11 @@ class VASwitcherFrame(ttk.Frame):
 
         ttk.Label(self, text="Selecione sua VA", font=("TkDefaultFont", 14, "bold")).pack(pady=20)
 
-        # KAFLT
+        # KAFLY (CORRIGIDO)
         ttk.Button(
             self, 
-            text="KAFLT (kafly.com.br)", 
-            command=lambda: self._select_va("KAFLT"), 
+            text="KAFLY (kafly.com.br)", 
+            command=lambda: self._select_va("KAFLY"), 
             bootstyle="primary",
             width=30
         ).pack(pady=10)
@@ -144,10 +144,11 @@ class LoginFormFrame(ttk.Frame):
         ttk.Label(self, text=f"Login: {va_key}", font=("TkDefaultFont", 18, "bold")).pack(pady=20)
         
         # --- Frame para centralizar o formulário ---
+        # Alterado pady para dar mais espaço vertical.
         form_frame = ttk.Frame(self)
-        form_frame.pack(pady=20, fill='x')
+        form_frame.pack(pady=10, fill='x') 
         form_frame.columnconfigure(0, weight=1)
-        form_frame.columnconfigure(1, weight=1) # Coluna das entradas
+        form_frame.columnconfigure(1, weight=1) 
         
         # Linha 0: E-mail/Username
         ttk.Label(form_frame, text="E-mail ou Username:", anchor='w').grid(row=0, column=0, columnspan=2, pady=(10, 0), padx=5, sticky='w')
@@ -163,16 +164,17 @@ class LoginFormFrame(ttk.Frame):
             text="Lembrar E-mail e Senha", 
             variable=self.remember_var, 
             bootstyle="round-toggle" 
-        ).grid(row=4, column=0, columnspan=2, pady=15, padx=5, sticky='w') # Padding maior para separar dos campos
+        ).grid(row=4, column=0, columnspan=2, pady=15, padx=5, sticky='w') 
 
-        # --- Status Label ---
-        # Centralizado e com fonte um pouco maior para destaque
-        self.status_label = ttk.Label(self, text="", bootstyle="info", font=("-size 10 -weight bold"), anchor='center')
-        self.status_label.pack(pady=10) # Padding grande
+        # --- Status Label (MOVIDO PARA O form_frame) ---
+        self.status_label = ttk.Label(form_frame, text="", bootstyle="info", font=("-size 10 -weight bold"), anchor='center')
+        # Row 5: Centraliza e estica para caber no frame
+        self.status_label.grid(row=5, column=0, columnspan=2, pady=(15, 5), sticky='ew') 
 
-        # --- Botões ---
-        button_frame = ttk.Frame(self)
-        button_frame.pack(pady=20) # Padding maior para separar do status
+        # --- Botões (MOVIDO PARA O form_frame) ---
+        button_frame = ttk.Frame(form_frame)
+        # Row 6: Posiciona a frame dos botões (que usa pack internamente)
+        button_frame.grid(row=6, column=0, columnspan=2, pady=(5, 10))
         
         ttk.Button(button_frame, text="Voltar", command=self.on_back, bootstyle="secondary").pack(side=LEFT, padx=10)
         ttk.Button(button_frame, text="Entrar", command=self._handle_login, bootstyle="success").pack(side=LEFT, padx=10)
