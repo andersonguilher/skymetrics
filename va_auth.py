@@ -1,31 +1,49 @@
 # va_auth.py
 import requests
 import json
-# Necessário instalar: pip install requests
+import configparser # Novo import
+import os
 
-# Constantes para os URLs das VAs
-URL_BASE = {
-    "KAFLT": "https://kafly.com.br",
-    "CUBANA": "https://cubana-va.com"
-}
-LOGIN_ENDPOINT = "/dash/utils/login_check.php"
-PILOTS_ENDPOINT = "/dash/utils/get_validated_pilots.php"
+# Constantes de Arquivo
+CONFIG_FILE = 'config.ini'
+
+# Função para carregar as configurações de URL
+def _load_config():
+    """Carrega as configurações de URL do config.ini."""
+    config = configparser.ConfigParser()
+    # Tenta ler o arquivo, se não existir, usa um dict vazio
+    config.read(CONFIG_FILE) 
+    
+    # Mapeamento dinâmico das URLs
+    url_base = {}
+    if 'URLS' in config:
+        # Pega as URLs base e remove o sufixo _BASE_URL para criar a chave da VA
+        for key, value in config.items('URLS'):
+            if key.endswith('_base_url'):
+                va_key = key.replace('_base_url', '').upper()
+                url_base[va_key] = value
+
+    return url_base, config.get('URLS', 'login_endpoint', fallback='/dash/utils/login_check.php'), config.get('URLS', 'pilots_endpoint', fallback='/dash/utils/get_validated_pilots.php')
+
+# Carrega as configurações globais
+URL_BASE, LOGIN_ENDPOINT, PILOTS_ENDPOINT = _load_config()
+
+if not URL_BASE:
+    print("Aviso: Configurações de URL não encontradas. Verifique o config.ini.")
 
 
 def check_login(va_key: str, email: str, password: str) -> bool:
     """
     Tenta autenticar o piloto na VA especificada usando o endpoint login_check.php.
-    
-    :param va_key: Chave da VA ('KAFLT' ou 'CUBANA').
-    :param email: E-mail ou username do piloto.
-    :param password: Senha do piloto.
-    :return: True se o login for bem-sucedido (resposta 'true'), False caso contrário.
     """
     try:
+        if va_key not in URL_BASE:
+            print(f"Erro: Chave de VA '{va_key}' não encontrada nas configurações.")
+            return False
+            
         url = URL_BASE[va_key] + LOGIN_ENDPOINT
         data = {'username': email, 'password': password}
         
-        # A resposta do PHP é 'true' ou 'false' como texto simples
         response = requests.post(url, data=data, timeout=10)
         return response.text.strip().lower() == 'true'
         
@@ -36,24 +54,21 @@ def check_login(va_key: str, email: str, password: str) -> bool:
 
 def is_pilot_validated(va_key: str, email: str) -> bool:
     """
-    Verifica se o piloto consta na lista de pilotos validados da VA usando get_validated_pilots.php.
-    
-    :param va_key: Chave da VA ('KAFLT' ou 'CUBANA').
-    :param email: E-mail do piloto (usado para comparação).
-    :return: True se o e-mail do piloto estiver na lista, False caso contrário.
+    Verifica se o piloto consta na lista de pilotos validados da VA.
     """
     try:
+        if va_key not in URL_BASE:
+            print(f"Erro: Chave de VA '{va_key}' não encontrada nas configurações.")
+            return False
+            
         url = URL_BASE[va_key] + PILOTS_ENDPOINT
         
-        # A resposta é um JSON com a lista de pilotos
         response = requests.get(url, timeout=10)
-        response.raise_for_status() # Lança exceção para códigos de erro HTTP
+        response.raise_for_status()
         
         pilots_list = response.json()
         
-        # Verifica se o e-mail do piloto (COL_EMAIL_PILOTO no PHP) está na lista
         for pilot in pilots_list:
-            # O campo é 'email_piloto' conforme o get_validated_pilots.php
             if pilot.get('email_piloto', '').lower() == email.lower():
                 return True
                 

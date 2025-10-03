@@ -1,3 +1,5 @@
 ttkbootstrap
 SimConnect
 requests
+keyring # Novo requisito para armazenamento seguro de senha
+configparser # Para ler/escrever o config.ini

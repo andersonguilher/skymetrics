@@ -14,8 +14,20 @@ class MainApplication(ttk.Window):
         self.current_frame = None
         self.va_key_selected = None
         self.pilot_email = None
-
-        self._show_va_selection()
+        
+        # --- NOVO: Lógica de Auto-Login ---
+        va_key, email, _, remember_me = gui_elements.load_credentials()
+        
+        if remember_me and va_key and email:
+            # Auto-login: Vai direto para o monitor se as credenciais estiverem salvas.
+            self.va_key_selected = va_key
+            self.pilot_email = email
+            # Usa 'after' para garantir que a janela Tkinter esteja totalmente inicializada
+            self.after(100, self._show_flight_monitor)
+        else:
+            # Inicia na seleção da VA
+            self._show_va_selection()
+        # --- Fim da Lógica de Auto-Login ---
         
         # Adiciona o protocolo de fechamento na janela principal para limpar SimConnect
         self.protocol("WM_DELETE_WINDOW", self.on_app_closing)
@@ -69,10 +81,13 @@ class MainApplication(ttk.Window):
     def on_app_closing(self):
         """Função chamada ao fechar a janela. Limpa o SimConnect/Thread do monitor."""
         if hasattr(self, 'monitor'):
-            self.monitor.on_closing() # Chama o método de limpeza do SimConnect
+            # Chama o método de limpeza do monitor. Se for fechamento manual, 
+            # monitor.on_closing() destrói a janela principal.
+            self.monitor.on_closing() 
 
-        # Se houver outro método de limpeza da janela principal, ele é chamado aqui:
-        self.destroy()
+        # REMOÇÃO DA DESTRUIÇÃO REDUNDANTE: Não há necessidade de chamar self.destroy()
+        # aqui, pois ela já foi chamada pelo monitor.on_closing() no fechamento manual.
+        pass
 
 if __name__ == "__main__":
     app = MainApplication()

@@ -7,6 +7,7 @@ import sys
 import random
 import os
 from PIL import Image, ImageTk
+import gui_elements # Novo import
 
 # =================================================================
 # 1. SIMCONNECT MOCKUP E INICIALIZAÇÃO 
@@ -265,8 +266,10 @@ class AircraftMonitorApp:
     def __init__(self, master):
         self.master = master
         # Configurações de janela (ajustadas para não sobrescrever o MainApplication)
-        # Removido o .title e .geometry daqui, agora é feito em va_monitor.py
         master.resizable(False, False) 
+        
+        # --- NOVO: Variável para armazenar o ID do after ---
+        self.after_id = None
 
         self._load_icons()
 
@@ -277,10 +280,29 @@ class AircraftMonitorApp:
         self.data_thread = threading.Thread(target=self.polling_loop, daemon=True)
         self.data_thread.start()
 
-        self.master.after(500, self.update_ui)
+        # Armazena o ID da primeira chamada after
+        self.after_id = self.master.after(500, self.update_ui)
         
-        # self.master.protocol("WM_DELETE_WINDOW", self.on_closing) # Mantido para gerenciar o SimConnect
-
+    def _on_logoff(self):
+        """
+        Função chamada ao clicar em Logoff.
+        Limpa as credenciais salvas e retorna para a tela inicial.
+        """
+        # 1. Deleta as credenciais salvas
+        current_va = self.master.va_key_selected
+        current_email = self.master.pilot_email
+        gui_elements.delete_credentials(current_va, current_email)
+        
+        # 2. Fecha a conexão SimConnect e a thread, e CANCELA o loop de UI
+        self.on_closing(is_logoff=True) 
+        
+        # 3. DESTROI O FRAME DA UI DO MONITOR
+        if hasattr(self, 'main_frame') and self.main_frame.winfo_exists():
+            self.main_frame.destroy() 
+        
+        # 4. Retorna à tela de seleção de VA (no MainApplication)
+        self.master._show_va_selection() 
+        
     def _set_connection_indicator(self):
         # ... (código completo)
         """Define o ícone e o texto de status da conexão."""
@@ -303,17 +325,26 @@ class AircraftMonitorApp:
         self.connection_status_label.image = icon 
 
     def setup_ui(self):
-        # ... (código completo de setup_ui)
-        main_frame = ttk.Frame(self.master, padding=15)
-        main_frame.pack(fill=BOTH, expand=YES)
+        # --- MUDANÇA AQUI: Armazena o frame principal como self.main_frame ---
+        self.main_frame = ttk.Frame(self.master, padding=15)
+        self.main_frame.pack(fill=BOTH, expand=YES)
+        
+        # --- NOVO: Botão de Logoff (Discreto) ---
+        ttk.Button(
+            self.main_frame, # Usa self.main_frame como master
+            text="Logoff",
+            command=self._on_logoff,
+            bootstyle="link-danger", # Estilo discreto e em vermelho
+            cursor="hand2"
+        ).place(relx=1.0, rely=0, x=-15, y=5, anchor=NE)
         
         # FONTE DIMINUÍDA (16 -> 11)
-        ttk.Label(main_frame, text="Monitor de Voo Detalhado", font=("TkDefaultFont", 11, "bold")).pack(pady=(0, 15))
+        ttk.Label(self.main_frame, text="Monitor de Voo Detalhado", font=("TkDefaultFont", 11, "bold")).pack(pady=(0, 15))
 
         # --- INDICADOR DE STATUS (COM IMAGEM) ---
         # FONTE DIMINUÍDA (11 -> 8)
         self.connection_status_label = ttk.Label(
-            main_frame, 
+            self.main_frame, 
             text="Iniciando...", 
             font=("-size 8 -weight bold"),
             bootstyle="info"
@@ -321,7 +352,7 @@ class AircraftMonitorApp:
         self.connection_status_label.pack(pady=5) 
         
         # --- Seção 1: Dados de Voo ---
-        data_frame = ttk.Labelframe(main_frame, text="Dados Primários", padding=10)
+        data_frame = ttk.Labelframe(self.main_frame, text="Dados Primários", padding=10)
         data_frame.pack(fill=X, pady=10)
         data_frame.columnconfigure(0, weight=1)
         data_frame.columnconfigure(1, weight=1)
@@ -350,7 +381,7 @@ class AircraftMonitorApp:
             self.data_labels[key] = label
         
         # --- Seção 2: Alertas e Warnings ---
-        alert_frame = ttk.Labelframe(main_frame, text="Alertas do Sistema", padding=10)
+        alert_frame = ttk.Labelframe(self.main_frame, text="Alertas do Sistema", padding=10)
         alert_frame.pack(fill=X, pady=10)
         
         self.alert_labels = {}
@@ -380,9 +411,12 @@ class AircraftMonitorApp:
             self.alert_labels[key] = label
 
     def update_ui(self):
-        # ... (código completo de update_ui)
         """Atualiza a interface com os dados mais recentes."""
         
+        # Verifica se o frame principal ainda existe antes de tentar atualizar os widgets
+        if not self.running or not self.main_frame.winfo_exists():
+            return
+
         def update_alert_label(key, is_alert_on, message_on="ALERTA ATIVO", message_off="NORMAL"):
             style = "danger" if is_alert_on else "success"
             text = message_on if is_alert_on else message_off
@@ -449,7 +483,8 @@ class AircraftMonitorApp:
 
 
         if self.running:
-            self.master.after(500, self.update_ui)
+             # Armazena o ID da chamada para que possa ser cancelada
+             self.after_id = self.master.after(500, self.update_ui)
 
     def polling_loop(self):
         """Loop de busca de dados rodando em segundo plano (a cada 0.1s)."""
@@ -457,18 +492,28 @@ class AircraftMonitorApp:
             fetch_all_data()
             time.sleep(0.1)
 
-    def on_closing(self):
-        """Encerra threads e fecha a conexão SimConnect. (Chamado pelo va_monitor)"""
+    def on_closing(self, is_logoff=False):
+        """
+        Encerra threads, fecha a conexão SimConnect e cancela o agendamento de UI.
+        """
         global sm
         self.running = False
         
+        # --- NOVO: Cancela o agendamento da UI ---
+        if self.after_id:
+             try:
+                 self.master.after_cancel(self.after_id)
+             except Exception:
+                 # Pode falhar se o after já tiver sido executado ou se o widget foi destruído
+                 pass
+        
+        # Encerra a conexão SimConnect
         if sm and not isinstance(sm, MockSimConnect): 
             try:
                 sm.exit()
             except:
                 pass
         
-        self.master.destroy()
-
-# REMOVIDO: def initialize_app()
-# REMOVIDO: if __name__ == "__main__":
+        # O Logoff não destrói a janela principal, ele apenas a limpa e retorna à tela inicial.
+        if not is_logoff:
+             self.master.destroy()
