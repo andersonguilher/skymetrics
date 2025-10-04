@@ -1,4 +1,4 @@
-# login_client_kafly.py (FINAL: Com Syntax Error Resolvido)
+# login_client_kafly.py (FINAL: Cliente Completo)
 
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
@@ -30,6 +30,7 @@ KAFY_BASE_URL = "https://kafly.com.br"
 LOGIN_ENDPOINT = "/dash/utils/login_check.php"
 PILOTS_ENDPOINT = "/dash/utils/get_validated_pilots.php"
 WEBSOCKET_URL = "ws://www.kafly.com.br:8765" # URL do Servidor de Dados
+HEARTBEAT_INTERVAL = 5 # Envio forçado a cada 5s para evitar timeout
 
 # --- Variáveis Globais de Estado ---
 CONN_STATUS = "REAL" 
@@ -39,7 +40,8 @@ last_sent_data = None
 
 # PRECISION MAP: Define a precisão funcional de cada métrica
 DATA_PRECISION = { 
-    "alt_ind": 0, "vs": 0, "ias": 1, "tas": 1, "agl": 0, "on_ground": 0, "total_fuel": 0, "gear_left_pos": 0, "g_force": 2, "engine_count": 0, 
+    "alt_ind": 0, "vs": 0, "ias": 1, "tas": 1, "agl": 0, "on_ground": 0, 
+    "total_fuel": 0, "gear_left_pos": 0, "g_force": 2, "engine_count": 0, 
     "lat": 4, "lng": 4, 
     "eng_combustion": 0, "light_beacon_on": 0, "light_landing_on": 0, "light_strobe_on": 0, "plane_bank_degrees": 1, 
     "engine_vibration_1": 0,
@@ -142,6 +144,10 @@ class MockAircraftRequests:
         if var == "STALL_WARNING": return 1 if 10 < cycle_60s < 12 else 0 
         if var == "GENERAL_ENG_FIRE:1": return 1 if 10 < cycle_60s < 15 else 0 
         if var == "GENERAL_ENG_VIBRATION:1": return 1200 if 25 < cycle_60s < 28 else 500 
+        if var == "STALL_PROTECTION_ACTIVE": return 0 
+        if var == "GPWS_WARNING": return 0 
+        if var == "FLAPS_SPEED_EXCEEDED": return 0 
+        if var == "GEAR_WARNING_SYSTEM_ACTIVE": return 0 
         return 0
 
 # --- VARIÁVEIS DE CONEXÃO (INICIALIZAÇÃO SEGURA) ---
@@ -176,21 +182,21 @@ def fetch_all_data():
     flight_data["vs"] = get_safe_value("VERTICAL_SPEED")
     if abs(flight_data["vs"]) < 0.5: flight_data["vs"] = 0.0 # Coerção de Zero
          
-    # Coleta de Latitude e Longitude (Garantido)
+    # Coleta de Lat/Lng (Garantido)
     flight_data["lat"] = get_safe_value("PLANE_LATITUDE", default=0.0); flight_data["lng"] = get_safe_value("PLANE_LONGITUDE", default=0.0)
     
-    # 2. Coleta de Dados Primários (restante)
+    # Coleta de Dados Primários (restante)
     flight_data["alt_ind"] = get_safe_value("PLANE_ALTITUDE"); flight_data["ias"] = get_safe_value("AIRSPEED_INDICATED")
     flight_data["tas"] = get_safe_value("AIRSPEED_TRUE"); flight_data["agl"] = get_safe_value("ALTITUDE ABOVE GROUND"); flight_data["on_ground"] = get_safe_value("SIM_ON_GROUND")
     flight_data["g_force"] = get_safe_value("G_FORCE"); flight_data["total_fuel"] = get_safe_value("FUEL_TOTAL_QUANTITY"); flight_data["gear_left_pos"] = round(get_safe_value("GEAR_HANDLE_POSITION") * 100, 0)
     flight_data["engine_count"] = int(get_safe_value("NUMBER_OF_ENGINES", default=0)); flight_data["plane_bank_degrees"] = get_safe_value("PLANE_BANK_DEGREES", default=0.0)
     flight_data["engine_vibration_1"] = get_safe_value("GENERAL_ENG_VIBRATION:1", default=0.0)
 
-    # 3. Coleta de Status e Luzes
+    # Coleta de Status e Luzes
     flight_data["eng_combustion"] = get_safe_value("GENERAL_ENG_COMBUSTION:1", default=0); flight_data["light_beacon_on"] = get_safe_value("LIGHT_BEACON_ON", default=0)
     flight_data["light_landing_on"] = get_safe_value("LIGHT_LANDING_ON", default=0); flight_data["light_strobe_on"] = get_safe_value("LIGHT_STROBE_ON", default=0)
 
-    # 4. Lógica de Alertas
+    # Lógica de Alertas
     alerts = flight_data["alerts"]
     alerts["overspeed_warning"] = get_safe_value("OVERSPEED_WARNING"); alerts["stall_warning"] = get_safe_value("STALL_WARNING"); alerts["stall_protection_active"] = get_safe_value("STALL_PROTECTION_ACTIVE")
     alerts["gpws_warning"] = get_safe_value("GPWS_WARNING"); alerts["flaps_speed_exceeded"] = get_safe_value("FLAPS_SPEED_EXCEEDED"); alerts["gear_warning_system_active"] = get_safe_value("GEAR_WARNING_SYSTEM_ACTIVE")
@@ -201,14 +207,6 @@ def fetch_all_data():
 
 
 # --- OTIMIZAÇÃO (Delta Encoding) ---
-DATA_PRECISION = { 
-    "alt_ind": 0, "vs": 0, "ias": 1, "tas": 1, "agl": 0, "on_ground": 0, 
-    "total_fuel": 0, "gear_left_pos": 0, "g_force": 2, "engine_count": 0, 
-    "lat": 4, "lng": 4, 
-    "eng_combustion": 0, "light_beacon_on": 0, "light_landing_on": 0, "light_strobe_on": 0, "plane_bank_degrees": 1, 
-    "engine_vibration_1": 0,
-}
-
 def create_rounded_data(source_data):
     """Cria um novo dicionário com as métricas arredondadas para a precisão definida."""
     global DATA_PRECISION
@@ -231,6 +229,7 @@ class FlightMonitor:
         self.pilot_email = pilot_email; self.numeric_id = numeric_id
         self.vatsim_id = pilot_data.get('vatsim_id', 'N/A'); self.ivao_id = pilot_data.get('ivao_id', 'N/A')
         self.running = True; self.ws_client = None; self.last_sent_data = None; self.packets_sent_count = 0; self.total_bytes_sent = 0.0
+        self.last_send_time = time.time() # NOVO: Inicializa o tempo do último envio
 
     def start_monitor(self):
         """Inicia a thread de gerenciamento de conexão e reconexão."""
@@ -258,16 +257,27 @@ class FlightMonitor:
     def _on_close(self, ws, close_status_code, close_msg): print(f"[WS] Conexão encerrada pelo servidor ou erro (Code: {close_status_code}).")
 
     def _send_data_loop(self):
+        global HEARTBEAT_INTERVAL
         while self.running:
             try:
                 fetch_all_data(); current_rounded = create_rounded_data(flight_data)
                 
-                if has_significant_change(current_rounded, self.last_sent_data):
+                # Heartbeat: Envia se houver mudança OU se o tempo limite for atingido
+                force_send = (time.time() - self.last_send_time) >= HEARTBEAT_INTERVAL
+
+                if has_significant_change(current_rounded, self.last_sent_data) or force_send:
+                    
                     self.packets_sent_count += 1
                     payload = json.dumps(current_rounded)
+                    
                     message_size = len(payload.encode('utf-8'))
                     self.total_bytes_sent += message_size
-                    self.ws_client.send(payload); self.last_sent_data = current_rounded.copy()
+                    current_rounded['mb_sent'] = self.total_bytes_sent / (1024 * 1024)
+                    current_rounded['packets_sent'] = self.packets_sent_count
+
+                    self.ws_client.send(payload)
+                    self.last_sent_data = current_rounded.copy()
+                    self.last_send_time = time.time() # Atualiza o tempo do último envio
                 
             except websocket.WebSocketConnectionClosedException: break 
             except Exception as e: time.sleep(0.1) 
@@ -288,8 +298,7 @@ class LoginFormFrame(ttk.Frame):
         ttk.Label(form_frame, text="Senha:", anchor='w').grid(row=2, column=0, columnspan=2, pady=(10, 0), padx=5, sticky='w')
         ttk.Entry(form_frame, textvariable=self.password_var, show="*", width=40).grid(row=3, column=0, columnspan=2, pady=5, ipady=3, padx=5, sticky='ew')
         ttk.Checkbutton(form_frame, text="Lembrar E-mail e Senha", variable=self.remember_var, bootstyle="round-toggle").grid(row=4, column=0, columnspan=2, pady=15, padx=5, sticky='w') 
-        self.status_label = ttk.Label(form_frame, text="", bootstyle="info", font=("-size 10 -weight bold"), anchor='center')
-        self.status_label.grid(row=5, column=0, columnspan=2, pady=(15, 5), sticky='ew') 
+        self.status_label = ttk.Label(form_frame, text="", bootstyle="info", font=("-size 10 -weight bold"), anchor='center'); self.status_label.grid(row=5, column=0, columnspan=2, pady=(15, 5), sticky='ew') 
         ttk.Button(form_frame, text="Entrar", command=self._handle_login, bootstyle="success").grid(row=6, column=0, columnspan=2, pady=(5, 10))
         self._load_saved_credentials()
 
@@ -297,8 +306,7 @@ class LoginFormFrame(ttk.Frame):
          email_saved, password_saved, remember_me = load_credentials()
          if email_saved: self.email_var.set(email_saved)
          if remember_me:
-             if password_saved: self.password_var.set(password_saved)
-             self.remember_var.set(True)
+             if password_saved: self.password_var.set(password_saved); self.remember_var.set(True)
              self.status_label.config(text="Credenciais salvas carregadas.", bootstyle="info")
             
     def _handle_login(self):
@@ -312,11 +320,8 @@ class LoginFormFrame(ttk.Frame):
         if not pilot_data:
             self.status_label.config(text="Login OK, mas piloto não está na lista de validados.", bootstyle="warning"); delete_credentials(email); return
         
-        # FIX DO SYNTAX ERROR: Uso correto da estrutura if/else
-        if remember: 
-            save_credentials(email, password)
-        else: 
-            delete_credentials(email)
+        if remember: save_credentials(email, password)
+        else: delete_credentials(email)
             
         numeric_id = generate_pilot_numeric_id(email)
         self.status_label.config(text=f"Piloto Validado! ID: {numeric_id}", bootstyle="success")
