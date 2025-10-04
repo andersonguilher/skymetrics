@@ -118,6 +118,9 @@ flight_data = {
     "has_landed": False,
     "landing_vs": 0.0,
     
+    # NOVO: Status Online da Rede Virtual
+    "network_online": "N/A",
+    
     "alerts": {
         "overspeed_warning": 0, "stall_warning": 0, "stall_protection_active": 0,
         "gear_warning_system_active": 0, "gpws_warning": 0, "flaps_speed_exceeded": 0,
@@ -263,8 +266,11 @@ class AircraftMonitorApp:
             self.icon_green = None
             self.icon_red = None
             
-    def __init__(self, master):
+    # MODIFICAÇÃO: Adiciona va_key e email no __init__
+    def __init__(self, master, va_key, email):
         self.master = master
+        self.va_key = va_key # Armazena a chave da VA
+        self.email = email   # Armazena o e-mail do piloto
         # Configurações de janela (ajustadas para não sobrescrever o MainApplication)
         master.resizable(False, False) 
         
@@ -277,11 +283,29 @@ class AircraftMonitorApp:
         self.setup_ui()
         self._set_connection_indicator() 
         
+        # NOVO: Checagem de status da Rede Virtual no início
+        self.check_network_status()
+
         self.data_thread = threading.Thread(target=self.polling_loop, daemon=True)
         self.data_thread.start()
 
         # Armazena o ID da primeira chamada after
         self.after_id = self.master.after(500, self.update_ui)
+
+    # NOVO: Função para checar o status online IVAO/VATSIM
+    def check_network_status(self):
+        """Busca o status online do piloto nas redes virtuais (IVAO/VATSIM)."""
+        global flight_data
+        
+        # Importamos aqui para evitar circular dependency ao importar va_auth no topo
+        import va_auth 
+        
+        if CONN_STATUS == "SIMULADO":
+             flight_data["network_online"] = "SIMULADO"
+        else:
+             # Chama a função que criamos em va_auth.py
+             is_online, network = va_auth.is_pilot_online_ivao_vatsim(self.va_key, self.email)
+             flight_data["network_online"] = network # Armazena 'IVAO', 'VATSIM', 'Offline' ou 'Piloto não validado na VA'
         
     def _on_logoff(self):
         """
@@ -386,6 +410,7 @@ class AircraftMonitorApp:
         
         self.alert_labels = {}
         alert_fields = [
+            ("STATUS REDE VIRTUAL:", "network_online_status"), # NOVO CAMPO ADICIONADO AQUI
             ("STATUS VOO:", "flight_status"),
             ("VS Pouso (Toque):", "landing_vs"),
             ("OVERSPEED_WARNING", "overspeed_warning"),
@@ -406,7 +431,7 @@ class AircraftMonitorApp:
                 row=i, column=0, padx=5, pady=4, sticky="w"
             )
             # FONTE DIMINUÍDA (11 -> 8)
-            label = ttk.Label(alert_frame, text="NORMAL", bootstyle="success", font=("-size 8"))
+            label = ttk.Label(alert_frame, text="N/A", bootstyle="info", font=("-size 8")) # Inicializa com N/A
             label.grid(row=i, column=1, padx=5, pady=4, sticky="e")
             self.alert_labels[key] = label
 
@@ -437,6 +462,27 @@ class AircraftMonitorApp:
 
         # --- 2. Atualiza Alertas e Status de Voo ---
         alerts = flight_data["alerts"]
+
+        # NOVO: Status da Rede Virtual
+        network_status = flight_data.get("network_online", "N/A")
+        
+        if network_status == "IVAO":
+             status_text = "ONLINE NA IVAO"
+             status_style = "success"
+        elif network_status == "VATSIM":
+             status_text = "ONLINE NA VATSIM"
+             status_style = "success"
+        elif network_status == "Offline":
+             status_text = "OFFLINE NAS REDES"
+             status_style = "warning"
+        elif network_status == "SIMULADO":
+             status_text = "MOCK SIMCONNECT"
+             status_style = "info"
+        else: # "Piloto não validado na VA" ou N/A
+             status_text = network_status 
+             status_style = "info"
+             
+        self.alert_labels["network_online_status"].config(text=status_text, bootstyle=status_style)
         
         # Status do Voo
         if flight_data["is_airborne"]:

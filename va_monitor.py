@@ -73,9 +73,9 @@ class MainApplication(ttk.Window):
         self._clear_frame()
         self.geometry("500x750") 
         
-        # Instancia o monitor de voo, passando a si mesmo (self) como master.
+        # MODIFICAÇÃO: Passa va_key_selected e pilot_email para o Monitor
         # Ele será responsável pela interface principal a partir deste ponto.
-        self.monitor = AircraftMonitorApp(self) 
+        self.monitor = AircraftMonitorApp(self, self.va_key_selected, self.pilot_email) 
         self.title(f"Monitor de Dados de Aeronave ({self.va_key_selected} - {self.pilot_email})")
 
     def on_app_closing(self):
