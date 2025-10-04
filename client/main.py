@@ -1,4 +1,4 @@
-# login_client_kafly.py (FINAL: Cliente Completo)
+# login_client_kafly.py (FINAL: Cliente Completo com Configuração Externa)
 
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
@@ -20,17 +20,29 @@ import threading
 from datetime import datetime
 
 # =================================================================
-# 1. CONFIGURAÇÕES E ENDPOINTS
+# 1. CONFIGURAÇÕES E ENDPOINTS (Lidos do .ini)
 # =================================================================
-CONFIG_FILE = 'login_config.ini'
-CONFIG_SECTION = 'KAFY_LOGIN'
-KEYRING_SERVICE_ID = 'KAFY_Pilot_Password'
-VA_KEY = "KAFLY"
-KAFY_BASE_URL = "https://kafly.com.br"
-LOGIN_ENDPOINT = "/dash/utils/login_check.php"
-PILOTS_ENDPOINT = "/dash/utils/get_validated_pilots.php"
-WEBSOCKET_URL = "ws://www.kafly.com.br:8765" # URL do Servidor de Dados
-HEARTBEAT_INTERVAL = 5 # Envio forçado a cada 5s para evitar timeout
+CONFIG_FILE = 'client_config.ini'
+CLIENT_CONFIG_SECTION = 'CLIENT_CONFIG' 
+CLIENT_LOGIN_SECTION = 'LOGIN_CREDENTIALS'
+
+# --- Carregar Configurações do Arquivo ---
+config = configparser.ConfigParser()
+config.read(CONFIG_FILE)
+
+# Lógica de fallback para garantir que as seções existam
+if CLIENT_CONFIG_SECTION not in config: config[CLIENT_CONFIG_SECTION] = {}
+if CLIENT_LOGIN_SECTION not in config: config[CLIENT_LOGIN_SECTION] = {}
+
+# CARREGAR VARIÁVEIS DO INI
+KEYRING_SERVICE_ID = config.get(CLIENT_CONFIG_SECTION, 'keyring_service_id', fallback='KAFY_Pilot_Password')
+VA_KEY = config.get(CLIENT_CONFIG_SECTION, 'va_key', fallback='KAFLY')
+KAFY_BASE_URL = config.get(CLIENT_CONFIG_SECTION, 'kafy_base_url', fallback='https://kafly.com.br')
+LOGIN_ENDPOINT = config.get(CLIENT_CONFIG_SECTION, 'login_endpoint', fallback='/dash/utils/login_check.php')
+PILOTS_ENDPOINT = config.get(CLIENT_CONFIG_SECTION, 'pilots_endpoint', fallback='/dash/utils/get_validated_pilots.php')
+WEBSOCKET_URL = config.get(CLIENT_CONFIG_SECTION, 'websocket_url', fallback='ws://www.kafly.com.br:8765')
+HEARTBEAT_INTERVAL = config.getint(CLIENT_CONFIG_SECTION, 'heartbeat_interval', fallback=5)
+
 
 # --- Variáveis Globais de Estado ---
 CONN_STATUS = "REAL" 
@@ -39,10 +51,12 @@ aq = None
 last_sent_data = None 
 
 # PRECISION MAP: Define a precisão funcional de cada métrica
+# Lat/Lng e G_Force reduzidos para evitar jitter constante no solo.
 DATA_PRECISION = { 
     "alt_ind": 0, "vs": 0, "ias": 1, "tas": 1, "agl": 0, "on_ground": 0, 
-    "total_fuel": 0, "gear_left_pos": 0, "g_force": 2, "engine_count": 0, 
-    "lat": 4, "lng": 4, 
+    "total_fuel": 0, "gear_left_pos": 0, "g_force": 1, # DE 2 PARA 1
+    "engine_count": 0, 
+    "lat": 3, "lng": 3, # DE 4 PARA 3
     "eng_combustion": 0, "light_beacon_on": 0, "light_landing_on": 0, "light_strobe_on": 0, "plane_bank_degrees": 1, 
     "engine_vibration_1": 0,
 }
@@ -77,11 +91,11 @@ def get_validated_pilot_data(email: str) -> dict | None:
 def load_credentials() -> tuple[str, str, bool]:
     email, password, remember_me = "", "", False
     try:
-        config = configparser.ConfigParser()
-        config.read(CONFIG_FILE)
-        if CONFIG_SECTION in config:
-            email = config.get(CONFIG_SECTION, 'pilot_email', fallback="")
-            remember_me = config.getboolean(CONFIG_SECTION, 'remember_me', fallback=False)
+        global config 
+        config.read(CONFIG_FILE) 
+        if CLIENT_LOGIN_SECTION in config:
+            email = config.get(CLIENT_LOGIN_SECTION, 'pilot_email', fallback="")
+            remember_me = config.getboolean(CLIENT_LOGIN_SECTION, 'remember_me', fallback=False)
         if email and remember_me:
             password = keyring.get_password(KEYRING_SERVICE_ID, email)
     except Exception: pass
@@ -89,11 +103,11 @@ def load_credentials() -> tuple[str, str, bool]:
 
 def save_credentials(email: str, password: str):
     try:
-        config = configparser.ConfigParser()
+        global config 
         config.read(CONFIG_FILE)
-        if CONFIG_SECTION not in config: config[CONFIG_SECTION] = {}
-        config[CONFIG_SECTION]['remember_me'] = 'True'
-        config[CONFIG_SECTION]['pilot_email'] = email
+        if CLIENT_LOGIN_SECTION not in config: config[CLIENT_LOGIN_SECTION] = {}
+        config[CLIENT_LOGIN_SECTION]['remember_me'] = 'True'
+        config[CLIENT_LOGIN_SECTION]['pilot_email'] = email
         with open(CONFIG_FILE, 'w') as configfile: config.write(configfile)
         keyring_username = email
         keyring.set_password(KEYRING_SERVICE_ID, keyring_username, password)
@@ -104,9 +118,12 @@ def delete_credentials(email: str):
         keyring_username = email
         try: keyring.delete_password(KEYRING_SERVICE_ID, keyring_username)
         except Exception: pass 
-        config = configparser.ConfigParser()
+        
+        global config
         config.read(CONFIG_FILE)
-        if CONFIG_SECTION in config: config[CONFIG_SECTION]['remember_me'] = 'False'
+        if CLIENT_LOGIN_SECTION in config: 
+             config[CLIENT_LOGIN_SECTION]['remember_me'] = 'False'
+             config[CLIENT_LOGIN_SECTION]['pilot_email'] = ''
         with open(CONFIG_FILE, 'w') as configfile: config.write(configfile)
     except Exception as e: print(f"Erro ao deletar credenciais: {e}")
 
