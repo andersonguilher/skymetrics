@@ -1,0 +1,6 @@
+ttkbootstrap
+SimConnect
+requests
+keyring
+configparser
+websocket-client
