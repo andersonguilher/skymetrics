@@ -277,29 +277,37 @@ class FlightMonitor:
         global HEARTBEAT_INTERVAL
         while self.running:
             try:
-                fetch_all_data(); current_rounded = create_rounded_data(flight_data)
+                fetch_all_data(); 
+                current_rounded = create_rounded_data(flight_data)
                 
                 # Heartbeat: Envia se houver mudança OU se o tempo limite for atingido
                 force_send = (time.time() - self.last_send_time) >= HEARTBEAT_INTERVAL
 
+                # MUDANÇA: O last_sent_data agora é comparado *sem* as estatísticas do cliente.
                 if has_significant_change(current_rounded, self.last_sent_data) or force_send:
                     
-                    self.packets_sent_count += 1
-                    payload = json.dumps(current_rounded)
-                    
-                    message_size = len(payload.encode('utf-8'))
-                    self.total_bytes_sent += message_size
-                    current_rounded['mb_sent'] = self.total_bytes_sent / (1024 * 1024)
-                    current_rounded['packets_sent'] = self.packets_sent_count
-
-                    self.ws_client.send(payload)
+                    # 1. SALVA O ESTADO DE TELEMETRIA PURO (SEM AS ESTATÍSTICAS)
                     self.last_sent_data = current_rounded.copy()
+
+                    # 2. ATUALIZA E ADICIONA AS ESTATÍSTICAS NO PAYLOAD A SER ENVIADO
+                    self.packets_sent_count += 1
+                    payload_to_send = json.dumps({
+                        **current_rounded, # Telemetria pura
+                        'mb_sent': self.total_bytes_sent / (1024 * 1024),
+                        'packets_sent': self.packets_sent_count
+                    })
+
+                    # 3. CALCULA O TAMANHO DO NOVO PAYLOAD E ATUALIZA O CONTADOR GLOBAL
+                    message_size = len(payload_to_send.encode('utf-8'))
+                    self.total_bytes_sent += message_size
+
+                    # 4. ENVIA O PAYLOAD E ATUALIZA O TEMPO
+                    self.ws_client.send(payload_to_send)
                     self.last_send_time = time.time() # Atualiza o tempo do último envio
                 
             except websocket.WebSocketConnectionClosedException: break 
             except Exception as e: time.sleep(0.1) 
-            time.sleep(0.1) 
-
+            time.sleep(0.1)
 
 class LoginFormFrame(ttk.Frame):
     def __init__(self, master, on_success: Callable[[str, str, int, dict], None], **kwargs):
