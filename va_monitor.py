@@ -71,12 +71,14 @@ class MainApplication(ttk.Window):
     def _show_flight_monitor(self):
         """Exibe a tela de monitoramento de voo."""
         self._clear_frame()
-        self.geometry("500x750") 
+        self.geometry("300x550") 
         
-        # MODIFICAÇÃO: Passa va_key_selected e pilot_email para o Monitor
-        # Ele será responsável pela interface principal a partir deste ponto.
+        # Instancia o monitor de voo, passando a si mesmo (self) como master.
         self.monitor = AircraftMonitorApp(self, self.va_key_selected, self.pilot_email) 
         self.title(f"Monitor de Dados de Aeronave ({self.va_key_selected} - {self.pilot_email})")
+        
+        # NOVO: Vincula F12 à função de alternar a janela de alertas
+        self.bind("<F12>", lambda event: self.monitor.toggle_alerts_window())
 
     def on_app_closing(self):
         """Função chamada ao fechar a janela. Limpa o SimConnect/Thread do monitor."""
