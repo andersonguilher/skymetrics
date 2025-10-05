@@ -4,6 +4,9 @@ import websockets
 import json
 import os 
 from datetime import datetime, timedelta
+import requests 
+import time 
+from websockets.exceptions import ConnectionClosed # NOVO: Importa a exceção específica
 
 # =========================================================
 # 1. CONFIGURAÇÃO GERAL
@@ -25,26 +28,45 @@ CLIENT_FLIGHT_STATES = {}
 ALL_PILOT_SNAPSHOTS = {} 
 LAST_JSON_UPDATE_TIME = datetime.min # CHAVE: Nova variável de controle de tempo
 
+# NOVO: Variáveis para verificação de rede (Controle do Servidor)
+IVAO_DATA_URL = "https://api.ivao.aero/v2/tracker/whazzup"
+VATSIM_DATA_URL = "https://data.vatsim.net/v3/vatsim-data.json"
+NETWORK_CHECK_INTERVAL_SERVER = 120 # segundos (2 minutos)
+LAST_GLOBAL_NETWORK_CHECK_TIME = 0.0 # Tempo do último check global
+# Centralizado: {pilot_id: {'websocket': ws, 'vatsim_id': id, 'ivao_id': id, 'last_check': timestamp, 'tx_sent': bool}}
+PILOT_CONNECTIONS = {} 
+
+
 # =========================================================
 # 2. FUNÇÕES AUXILIARES
 # =========================================================
 
 async def register(websocket):
-    """Adiciona um novo cliente ao conjunto de usuários ativos."""
+    """Adiciona um novo cliente ao conjunto de usuários ativos (sem ID ainda)."""
     USERS.add(websocket)
+    websocket.pilot_id = "ANON" # Inicializa IDs na conexão
+    websocket.vatsim_id = "N/A"
+    websocket.ivao_id = "N/A"
     print(f"[{datetime.now().strftime('%H:%M:%S')}] NOVO CLIENTE CONECTADO: {websocket.remote_address}. Total: {len(USERS)}")
 
 async def unregister(websocket):
     """Remove um cliente do conjunto de usuários ativos."""
-    global ALL_PILOT_SNAPSHOTS
+    global ALL_PILOT_SNAPSHOTS, PILOT_CONNECTIONS, USERS
     
     if websocket in USERS:
-        pilot_id = next((p_id for p_id, ws in websocket.pilot_info.items()), "ANON") if hasattr(websocket, 'pilot_info') else "ANON"
-        if pilot_id in ALL_PILOT_SNAPSHOTS:
-            del ALL_PILOT_SNAPSHOTS[pilot_id]
-             
+        # Tenta obter o ID do objeto websocket
+        pilot_id = getattr(websocket, 'pilot_id', "ANON")
+        
+        # Remove o piloto dos snapshots e conexões controladas
+        if pilot_id != "ANON":
+            if pilot_id in ALL_PILOT_SNAPSHOTS:
+                del ALL_PILOT_SNAPSHOTS[pilot_id]
+            if pilot_id in PILOT_CONNECTIONS:
+                del PILOT_CONNECTIONS[pilot_id]
+        
         USERS.remove(websocket)
         print(f"[{datetime.now().strftime('%H:%M:%S')}] CLIENTE DESCONECTADO: {websocket.remote_address}. Total: {len(USERS)}")
+
 
 def print_event(pilot_id: str, event_name: str, description: str):
     """Exibe o evento na tela do console com timestamp."""
@@ -58,6 +80,114 @@ def format_number(value, decimals):
         else:
             return f"{value:,.{decimals}f}".replace(",", "_TEMP_").replace(".", ",").replace("_TEMP_", ".")
     return "N/A"
+
+# --- Lógica de Verificação de Status Online na IVAO/VATSIM ---
+def is_pilot_online_ivao(ivao_id: str) -> bool:
+    """Verifica se o piloto (pelo IVAO ID) está ativo na rede IVAO."""
+    if not ivao_id or ivao_id.strip('0') == 'N/A' or ivao_id.strip('0') == '': return False 
+    try:
+        response = requests.get(IVAO_DATA_URL, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        ivao_id_int = int(ivao_id.strip())
+        for client in data.get('clients', {}).get('pilots', []):
+            if client.get('userId') == ivao_id_int:
+                return True
+        return False
+    except Exception as e:
+        # print(f"[{datetime.now().strftime('%H:%M:%S')}] [SERVER CHECK] ERRO ao verificar IVAO: {e}")
+        return False
+
+def is_pilot_online_vatsim(vatsim_id: str) -> bool:
+    """Verifica se o piloto (pelo VATSIM ID) está ativo na rede VATSIM."""
+    if not vatsim_id or vatsim_id.strip('0') == 'N/A' or vatsim_id.strip('0') == '': return False
+    try:
+        response = requests.get(VATSIM_DATA_URL, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        vatsim_id_int = int(vatsim_id.strip())
+        for pilot in data.get('pilots', []):
+            if pilot.get('cid') == vatsim_id_int:
+                return True
+        return False
+    except Exception as e:
+        # print(f"[{datetime.now().strftime('%H:%M:%S')}] [SERVER CHECK] ERRO ao verificar VATSIM: {e}")
+        return False
+
+def check_network_status(vatsim_id: str, ivao_id: str) -> bool:
+    """Verifica se o piloto está ativo em pelo menos uma das redes (IVAO ou VATSIM)."""
+    is_vatsim_online = is_pilot_online_vatsim(vatsim_id)
+    is_ivao_online = is_pilot_online_ivao(ivao_id)
+    
+    return is_vatsim_online or is_ivao_online
+# --- FIM Lógica de Verificação de Status Online ---
+
+
+# NOVO: TAREFA DE BACKGROUND PARA VERIFICAR O STATUS DA REDE
+async def network_status_checker_loop():
+    global PILOT_CONNECTIONS, LAST_GLOBAL_NETWORK_CHECK_TIME, NETWORK_CHECK_INTERVAL_SERVER
+    
+    # Loop contínuo que roda em segundo plano
+    while True:
+        # Verifica o tempo a cada 1 segundo, mas executa a lógica a cada 120s
+        await asyncio.sleep(1) 
+
+        current_time = time.time()
+        
+        # 1. GATE PRINCIPAL: Verifica se há pilotos conectados
+        if not PILOT_CONNECTIONS:
+            LAST_GLOBAL_NETWORK_CHECK_TIME = current_time # Reset/Update para evitar estouro
+            continue
+
+        # 2. GATE DE TEMPO: Verifica se 120 segundos se passaram desde o último check global
+        if current_time - LAST_GLOBAL_NETWORK_CHECK_TIME < NETWORK_CHECK_INTERVAL_SERVER:
+            continue
+            
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [SERVER CHECK] Iniciando verificação de rede para {len(PILOT_CONNECTIONS)} piloto(s) (120s).")
+        LAST_GLOBAL_NETWORK_CHECK_TIME = current_time 
+
+        pilots_to_remove = []
+        # Usa list() para iterar sobre uma cópia, permitindo modificação do dicionário se necessário
+        for pilot_id, conn_data in list(PILOT_CONNECTIONS.items()):
+            
+            ws = conn_data['websocket']
+            vatsim_id = conn_data['vatsim_id']
+            ivao_id = conn_data['ivao_id']
+            
+            # Pula pilotos sem IDs válidos
+            if pilot_id == "ANON" or (vatsim_id == "N/A" and ivao_id == "N/A"):
+                continue
+
+            try:
+                is_online = check_network_status(vatsim_id, ivao_id)
+
+                if is_online:
+                    # Piloto ONLINE: Mantém a conexão aberta. Envia START_TX APENAS se ainda não foi enviado.
+                    if not conn_data['tx_sent']:
+                         command = json.dumps({"command": "START_TX"})
+                         await ws.send(command)
+                         conn_data['tx_sent'] = True
+                         print(f"[{datetime.now().strftime('%H:%M:%S')}] [SERVER CHECK] Piloto {pilot_id} ONLINE. Comando START_TX enviado (Heartbeat ÚNICO).")
+                    
+                    # Se 'tx_sent' for True, não faz mais nada. O cliente continua transmitindo.
+                    
+                else:
+                    # Piloto OFFLINE: Fecha a conexão
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [SERVER CHECK] Piloto {pilot_id} OFFLINE em IVAO/VATSIM. Fechando conexão.")
+                    await ws.close()
+                    pilots_to_remove.append(pilot_id)
+            
+            except websockets.ConnectionClosed:
+                pilots_to_remove.append(pilot_id)
+            except Exception as e:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] [SERVER CHECK] Erro processando/enviando comando para {pilot_id}: {e}")
+                pilots_to_remove.append(pilot_id)
+                
+        # Limpa os pilotos desconectados/fechados
+        for pilot_id in pilots_to_remove:
+             if pilot_id in PILOT_CONNECTIONS:
+                del PILOT_CONNECTIONS[pilot_id]
+
 
 def generate_estimated_data_table(average_rate_mbh):
     """Gera a tabela HTML com a estimativa de consumo."""
@@ -364,13 +494,14 @@ def update_monitor_files(data, received_count, total_bytes_received):
 # =========================================================
 async def handle_flight_data(websocket): 
     """Recebe os dados do cliente Python e atualiza os arquivos de monitoramento."""
-    global packets_received_count, total_bytes_received, CLIENT_FLIGHT_STATES, ALL_PILOT_SNAPSHOTS
+    global packets_received_count, total_bytes_received, CLIENT_FLIGHT_STATES, ALL_PILOT_SNAPSHOTS, PILOT_CONNECTIONS
     
     await register(websocket) 
 
     pilot_id = ""
     
     try:
+        # A primeira mensagem do cliente é essencialmente para identificação e ativação
         async for message in websocket:
             
             # --- 1. ATUALIZAÇÃO DOS CONTADORES DO SERVIDOR ---
@@ -381,8 +512,45 @@ async def handle_flight_data(websocket):
             data = json.loads(message)
             pilot_id = str(data.get("pilot_id", "ANON"))
             
-            websocket.pilot_info = {pilot_id: True}
-            
+            # Se for a primeira mensagem, extrai IDs e faz o check imediato
+            if pilot_id != "ANON" and pilot_id not in PILOT_CONNECTIONS:
+                vatsim_id = str(data.get("vatsim_id", "N/A"))
+                ivao_id = str(data.get("ivao_id", "N/A"))
+                
+                # Armazena IDs no objeto WebSocket
+                websocket.pilot_id = pilot_id
+                websocket.vatsim_id = vatsim_id
+                websocket.ivao_id = ivao_id
+                
+                # Armazena na lista controlada para o loop de background
+                PILOT_CONNECTIONS[pilot_id] = {
+                    'websocket': websocket, 
+                    'vatsim_id': vatsim_id, 
+                    'ivao_id': ivao_id, 
+                    'last_check': time.time(), # Marca o check imediato como feito
+                    'tx_sent': False # NOVO: Flag para garantir um único envio de START_TX
+                }
+                
+                # Realiza o CHECK IMEDIATO
+                is_online = check_network_status(vatsim_id, ivao_id)
+                
+                if is_online:
+                    # Piloto ONLINE: Envia comando para iniciar a transmissão e marca como enviado
+                    command = json.dumps({"command": "START_TX"})
+                    await websocket.send(command)
+                    PILOT_CONNECTIONS[pilot_id]['tx_sent'] = True # Marca como enviado
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [SERVER CHECK] Piloto {pilot_id} ONLINE (Check Imediato). Comando START_TX enviado (ÚNICO).")
+                else:
+                    # Piloto OFFLINE: Fecha a conexão
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [SERVER CHECK] Piloto {pilot_id} OFFLINE (Check Imediato). Fechando conexão.")
+                    await websocket.close()
+                    return # Encerra o handler
+
+            # Se o cliente enviou um pacote de dados, é porque o servidor enviou START_TX.
+            # O processamento de dados só continua se o piloto estiver na lista de conexões ativas.
+            if pilot_id not in PILOT_CONNECTIONS:
+                continue # Piloto não registrado ou recém-desconectado.
+
             # LOG CONCISO DE DEBUG
             altitude = data.get("alt_ind", 0); ias = data.get("ias", 0); vs = data.get('vs', 0); bank = data.get('plane_bank_degrees', 0)
             overspeed = data.get('alerts', {}).get('overspeed_warning', 0); stall = data.get('alerts', {}).get('stall_warning', 0)
@@ -444,7 +612,11 @@ async def handle_flight_data(websocket):
             # 4. Atualiza os arquivos
             update_monitor_files(data, packets_received_count, total_bytes_received)
             
-    except Exception: pass 
+    except ConnectionClosed:
+        # Ignora a exceção se a conexão foi fechada (normalmente ou abruptamente)
+        pass
+    except Exception as e: 
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [ERROR HANDLER] Erro no fluxo de dados para {pilot_id}: {e}")
     finally: await unregister(websocket)
 
 # =========================================================
@@ -478,12 +650,17 @@ async def main():
     
     create_initial_files()
     
+    # NOVO: Inicia a tarefa de verificação de rede em background
+    asyncio.create_task(network_status_checker_loop()) 
+    
     async with websockets.serve(handle_flight_data, HOST, PORT):
         print(f"*** Servidor WebSocket Skymetrics iniciado. Escutando em ws://{HOST}:{PORT} ***")
         await asyncio.Future()
 
 if __name__ == "__main__":
     try:
+        # É necessário instalar o pacote 'requests' no ambiente do servidor
+        import time 
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\nServidor encerrado por Ctrl+C.")

@@ -88,6 +88,8 @@ def get_validated_pilot_data(email: str) -> dict | None:
         return None
     except Exception: return None
 
+# OBS: Funções de check_network_status foram removidas.
+
 def load_credentials() -> tuple[str, str, bool]:
     email, password, remember_me = "", "", False
     try:
@@ -246,7 +248,9 @@ class FlightMonitor:
         self.pilot_email = pilot_email; self.numeric_id = numeric_id
         self.vatsim_id = pilot_data.get('vatsim_id', 'N/A'); self.ivao_id = pilot_data.get('ivao_id', 'N/A')
         self.running = True; self.ws_client = None; self.last_sent_data = None; self.packets_sent_count = 0; self.total_bytes_sent = 0.0
-        self.last_send_time = time.time() # NOVO: Inicializa o tempo do último envio
+        self.last_send_time = time.time() 
+        # NOVO: Flag para controlar a transmissão, controlada pelo servidor
+        self.transmitting = False 
 
     def start_monitor(self):
         """Inicia a thread de gerenciamento de conexão e reconexão."""
@@ -258,8 +262,13 @@ class FlightMonitor:
         RETRY_DELAY = 5 
         while self.running:
             print(f"Monitor ID: {self.numeric_id}. Tentando conectar a {WEBSOCKET_URL}...")
+            # Atualiza o websocket app para incluir o on_message
             self.ws_client = websocket.WebSocketApp(
-                WEBSOCKET_URL, on_open=self._on_open, on_error=self._on_error, on_close=self._on_close
+                WEBSOCKET_URL, 
+                on_open=self._on_open, 
+                on_error=self._on_error, 
+                on_close=self._on_close,
+                on_message=self._on_message # Adiciona o handler de mensagem
             )
             self.ws_client.run_forever() 
             if self.running:
@@ -267,47 +276,90 @@ class FlightMonitor:
                 time.sleep(RETRY_DELAY)
 
     def _on_open(self, ws):
-        print(f"[WS] Conexão estabelecida. Iniciando envio de dados...")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS] Conexão estabelecida. Enviando primeiro pacote de identificação...")
+        # NOVO: Envia o primeiro pacote APENAS com IDs. O servidor fará a verificação e responderá com START_TX.
+        initial_payload = json.dumps({
+            "pilot_id": str(self.numeric_id), 
+            "vatsim_id": self.vatsim_id, 
+            "ivao_id": self.ivao_id,
+            "packets_sent": 0, "mb_sent": 0.0
+        })
+        ws.send(initial_payload)
+        
+        # Inicia o loop de envio/coleta (que estará em espera)
         threading.Thread(target=self._send_data_loop, daemon=True).start()
 
-    def _on_error(self, ws, error): print(f"[WS ERROR] {error}")
-    def _on_close(self, ws, close_status_code, close_msg): print(f"[WS] Conexão encerrada pelo servidor ou erro (Code: {close_status_code}).")
+    def _on_error(self, ws, error): 
+        self.transmitting = False
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS ERROR] {error}")
+        
+    def _on_close(self, ws, close_status_code, close_msg): 
+        self.transmitting = False # Para a transmissão se a conexão cair
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS] Conexão encerrada pelo servidor ou erro (Code: {close_status_code}).")
+
+    def _on_message(self, ws, message):
+        """Recebe e processa comandos do servidor."""
+        try:
+            data = json.loads(message)
+            if data.get("command") == "START_TX":
+                self.transmitting = True
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] [CLIENT] Comando START_TX recebido. Iniciando transmissão de telemetria.")
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] [CLIENT] Erro ao receber mensagem do servidor: {e}")
 
     def _send_data_loop(self):
-        global HEARTBEAT_INTERVAL
+        global HEARTBEAT_INTERVAL, CONN_STATUS
+        
         while self.running:
+            
+            # GATE PRINCIPAL: Aguarda o comando START_TX do servidor
+            if not self.transmitting:
+                # O cliente envia um pacote de identificação e aguarda a permissão do servidor.
+                # Não faz sentido enviar dados do SimConnect se a permissão não foi dada.
+                time.sleep(1) # Espera 1 segundo e checa novamente
+                continue 
+            
             try:
+                # O cliente agora coleta e envia dados apenas se autorizado (self.transmitting == True)
+                
                 fetch_all_data(); 
                 current_rounded = create_rounded_data(flight_data)
                 
                 # Heartbeat: Envia se houver mudança OU se o tempo limite for atingido
                 force_send = (time.time() - self.last_send_time) >= HEARTBEAT_INTERVAL
 
-                # MUDANÇA: O last_sent_data agora é comparado *sem* as estatísticas do cliente.
                 if has_significant_change(current_rounded, self.last_sent_data) or force_send:
                     
-                    # 1. SALVA O ESTADO DE TELEMETRIA PURO (SEM AS ESTATÍSTICAS)
                     self.last_sent_data = current_rounded.copy()
 
-                    # 2. ATUALIZA E ADICIONA AS ESTATÍSTICAS NO PAYLOAD A SER ENVIADO
                     self.packets_sent_count += 1
                     payload_to_send = json.dumps({
-                        **current_rounded, # Telemetria pura
+                        **current_rounded, 
                         'mb_sent': self.total_bytes_sent / (1024 * 1024),
                         'packets_sent': self.packets_sent_count
                     })
 
-                    # 3. CALCULA O TAMANHO DO NOVO PAYLOAD E ATUALIZA O CONTADOR GLOBAL
                     message_size = len(payload_to_send.encode('utf-8'))
                     self.total_bytes_sent += message_size
 
-                    # 4. ENVIA O PAYLOAD E ATUALIZA O TEMPO
                     self.ws_client.send(payload_to_send)
-                    self.last_send_time = time.time() # Atualiza o tempo do último envio
+                    self.last_send_time = time.time() 
                 
+                # Short sleep para evitar busy loop
+                time.sleep(0.1)
+
             except websocket.WebSocketConnectionClosedException: break 
-            except Exception as e: time.sleep(0.1) 
-            time.sleep(0.1)
+            except Exception as e: 
+                # ----------------------------------------------------
+                # DETECÇÃO DE DESCONEXÃO DO SIMULADOR (SimConnect)
+                # ----------------------------------------------------
+                if CONN_STATUS == "REAL":
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [ERROR] SimConnect Exception: {e}. Assumindo simulador fechado/desconectado.")
+                    self.transmitting = False # Para a transmissão
+                    break 
+                
+                time.sleep(0.1) 
+
 
 class LoginFormFrame(ttk.Frame):
     def __init__(self, master, on_success: Callable[[str, str, int, dict], None], **kwargs):
