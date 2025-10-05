@@ -115,7 +115,11 @@ def save_credentials(email: str, password: str):
         keyring.set_password(KEYRING_SERVICE_ID, keyring_username, password)
     except Exception as e: print(f"Erro ao salvar credenciais: {e}")
 
-def delete_credentials(email: str):
+def delete_credentials(email: str, clear_email: bool = True):
+    """
+    Remove as credenciais e desativa o autologin.
+    Se 'clear_email' for False (usado no Logoff), o e-mail é mantido no arquivo.
+    """
     try:
         keyring_username = email
         try: keyring.delete_password(KEYRING_SERVICE_ID, keyring_username)
@@ -125,7 +129,8 @@ def delete_credentials(email: str):
         config.read(CONFIG_FILE)
         if CLIENT_LOGIN_SECTION in config: 
              config[CLIENT_LOGIN_SECTION]['remember_me'] = 'False'
-             config[CLIENT_LOGIN_SECTION]['pilot_email'] = ''
+             if clear_email:
+                 config[CLIENT_LOGIN_SECTION]['pilot_email'] = '' 
         with open(CONFIG_FILE, 'w') as configfile: config.write(configfile)
     except Exception as e: print(f"Erro ao deletar credenciais: {e}")
 
@@ -298,14 +303,20 @@ class FlightMonitor:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS] Conexão encerrada pelo servidor ou erro (Code: {close_status_code}).")
 
     def _on_message(self, ws, message):
-        """Recebe e processa comandos do servidor."""
-        try:
-            data = json.loads(message)
-            if data.get("command") == "START_TX":
-                self.transmitting = True
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] [CLIENT] Comando START_TX recebido. Iniciando transmissão de telemetria.")
-        except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] [CLIENT] Erro ao receber mensagem do servidor: {e}")
+            """Recebe e processa comandos do servidor."""
+            try:
+                data = json.loads(message)
+                command = data.get("command") # [NOVO] Captura o comando
+                
+                if command == "START_TX":
+                    self.transmitting = True
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [CLIENT] Comando START_TX recebido. Iniciando transmissão de telemetria.")
+                elif command == "STOP_TX": # [NOVO] Manipula o comando STOP_TX
+                    self.transmitting = False
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [CLIENT] Comando STOP_TX recebido. Pausando transmissão de telemetria.")
+
+            except Exception as e:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] [CLIENT] Erro ao receber mensagem do servidor: {e}")
 
     def _send_data_loop(self):
         global HEARTBEAT_INTERVAL, CONN_STATUS
@@ -389,42 +400,137 @@ class LoginFormFrame(ttk.Frame):
     def _handle_login(self):
         email = self.email_var.get().strip(); password = self.password_var.get().strip(); remember = self.remember_var.get()
         if not email or not password: self.status_label.config(text="Preenchimento obrigatório.", bootstyle="danger"); return
-        self.status_label.config(text="Verificando credenciais (1/3)...", bootstyle="info"); self.update() 
+        
+        # Inicia a thread para evitar travar a GUI
+        threading.Thread(target=self._process_login, args=(email, password, remember), daemon=True).start()
+        
+    def _process_login(self, email: str, password: str, remember: bool):
+        """Lógica de login movida para um thread separado."""
+        self.master.after(0, lambda: self.status_label.config(text="Verificando credenciais (1/3)...", bootstyle="info"))
+        
         if not check_login(email, password):
-            self.status_label.config(text="Falha no login. Verifique e-mail/senha.", bootstyle="danger"); delete_credentials(email); return
-        self.status_label.config(text="Login OK. Verificando status de piloto (2/3)...", bootstyle="info"); self.update()
+            self.master.after(0, lambda: self.status_label.config(text="Falha no login. Verifique e-mail/senha.", bootstyle="danger"))
+            delete_credentials(email); return # Limpa o email em caso de falha de login
+            
+        self.master.after(0, lambda: self.status_label.config(text="Login OK. Verificando status de piloto (2/3)...", bootstyle="info"))
+        
         pilot_data = get_validated_pilot_data(email) 
         if not pilot_data:
-            self.status_label.config(text="Login OK, mas piloto não está na lista de validados.", bootstyle="warning"); delete_credentials(email); return
+            self.master.after(0, lambda: self.status_label.config(text="Login OK, mas piloto não está na lista de validados.", bootstyle="warning"))
+            delete_credentials(email); return # Limpa o email se o piloto for inválido
         
         if remember: save_credentials(email, password)
-        else: delete_credentials(email)
+        else: delete_credentials(email) # Limpa tudo se não for para lembrar (incluindo o email)
             
         numeric_id = generate_pilot_numeric_id(email)
-        self.status_label.config(text=f"Piloto Validado! ID: {numeric_id}", bootstyle="success")
-        self.after(1000, lambda: self.on_success(email, numeric_id, pilot_data))
+        self.master.after(0, lambda: self.status_label.config(text=f"Piloto Validado! ID: {numeric_id}", bootstyle="success"))
+        self.master.after(1000, lambda: self.on_success(email, password, numeric_id, pilot_data))
 
 
 class MainApplication(ttk.Window):
     def __init__(self):
         super().__init__(themename="darkly")
         self.title(f"Monitor de Voo - Login {VA_KEY}"); self.geometry("450x480"); self.resizable(False, False)
-        self.monitor = None; self._show_login_form(); self.protocol("WM_DELETE_WINDOW", self._on_app_closing)
+        
+        # --- DEFINIÇÃO DO ÍCONE DA APLICAÇÃO ---
+        try:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            icon_path = os.path.join(base_dir, 'assets', 'icons', 'skymetrics.ico')
+            self.iconbitmap(icon_path)
+        except Exception as e:
+            # print(f"Aviso: Não foi possível carregar o ícone {icon_path}: {e}")
+            pass
+            
+        self.monitor = None
+        self.current_frame = None
+        self.current_pilot_email = None # Para gerenciar o logoff
+        self.protocol("WM_DELETE_WINDOW", self._on_app_closing)
+        
+        # Tenta Login Automático
+        email, password, remember_me = load_credentials()
+        if email and password and remember_me:
+             self._attempt_auto_login(email, password)
+        else:
+            self._show_login_form()
+
+    def _attempt_auto_login(self, email: str, password: str):
+        """Inicia o formulário e tenta logar automaticamente."""
+        # Usa o LoginFormFrame para gerenciar a lógica de threading de login
+        self.login_frame = LoginFormFrame(self, on_success=self._on_login_success) 
+        self.login_frame.pack(fill=BOTH, expand=YES)
+        self.current_frame = self.login_frame
+        
+        # Preenche os campos para visualização
+        self.login_frame.email_var.set(email)
+        self.login_frame.password_var.set(password)
+        self.login_frame.remember_var.set(True)
+        
+        self.login_frame.status_label.config(text="Tentando Login Automático...", bootstyle="info")
+        
+        # Inicia a tentativa de login no thread de background
+        threading.Thread(target=self.login_frame._process_login, args=(email, password, True), daemon=True).start()
+
+
     def _on_app_closing(self):
         if self.monitor: self.monitor.running = False;
         if CONN_STATUS == "REAL": sm.exit() 
         self.destroy()
+
     def _show_login_form(self):
+        # Limpa o frame anterior, se houver
+        if self.current_frame: self.current_frame.destroy()
+        
+        # Redefine o tamanho para a tela de login
+        self.geometry("450x480") 
+        
         self.login_frame = LoginFormFrame(self, on_success=self._on_login_success) 
         self.login_frame.pack(fill=BOTH, expand=YES)
-    def _on_login_success(self, email: str, numeric_id: int, pilot_data: dict):
-        self.login_frame.destroy(); self.geometry("400x150"); self.title(f"Monitor de Voo {VA_KEY} - ID: {numeric_id}")
-        self.monitor = FlightMonitor(email, numeric_id, pilot_data); self.monitor.start_monitor()
+        self.current_frame = self.login_frame
+
+    def _on_login_success(self, email: str, password: str, numeric_id: int, pilot_data: dict):
+        # Limpa o frame de login
+        if self.current_frame: self.current_frame.destroy()
+        
+        # Salva o email do piloto logado
+        self.current_pilot_email = email
+        
+        self.geometry("400x200") # Novo tamanho para a tela do monitor
+        self.title(f"Monitor de Voo {VA_KEY} - ID: {numeric_id}")
+        
+        # Inicializa e inicia o monitor
+        self.monitor = FlightMonitor(email, numeric_id, pilot_data)
+        self.monitor.start_monitor()
         
         print("-" * 50); print("CONEXÃO ESTABELECIDA E MONITOR DE DADOS INICIADO!"); print("-" * 50)
         
-        ttk.Label(self, text=f"Transmissão iniciada para ID: {numeric_id}", font=("TkDefaultFont", 12)).pack(pady=20)
-        ttk.Label(self, text=f"Status SimConnect: {CONN_STATUS}", font=("TkDefaultFont", 10), bootstyle="info").pack(pady=5)
+        # Cria o Frame do Monitor (Nova tela principal)
+        monitor_frame = ttk.Frame(self, padding=20)
+        monitor_frame.pack(fill=BOTH, expand=YES)
+        self.current_frame = monitor_frame
+        
+        ttk.Label(monitor_frame, text=f"Transmissão iniciada para ID: {numeric_id}", font=("TkDefaultFont", 12, "bold")).pack(pady=(10, 5))
+        ttk.Label(monitor_frame, text=f"Status SimConnect: {CONN_STATUS}", font=("TkDefaultFont", 10), bootstyle="info").pack(pady=5)
+        
+        # Botão de Logoff
+        ttk.Separator(monitor_frame, bootstyle="light").pack(fill='x', pady=10)
+        ttk.Button(monitor_frame, text="Logoff", command=self._handle_logoff, bootstyle="warning-outline").pack(pady=10)
+
+    def _handle_logoff(self):
+        """Encerra o monitor, apaga a senha e desativa o autologin, mantendo o email."""
+        
+        # 1. Encerra o monitor de forma segura
+        if self.monitor:
+            self.monitor.running = False
+        
+        # 2. Apaga a senha e desativa o autologin, MANTENDO O EMAIL.
+        if self.current_pilot_email:
+            # Usando clear_email=False para manter o email no .ini
+            delete_credentials(self.current_pilot_email, clear_email=False)
+            print("-" * 50); print(f"Logoff bem-sucedido. A senha de '{self.current_pilot_email}' foi removida. O email foi mantido para a próxima vez."); print("-" * 50)
+
+        # 3. Retorna à tela de login
+        self._show_login_form()
+
 
 if __name__ == "__main__":
     app = MainApplication(); app.mainloop()

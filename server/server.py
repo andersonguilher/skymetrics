@@ -60,11 +60,21 @@ async def unregister(websocket):
         # Remove o piloto dos snapshots e conexões controladas
         if pilot_id != "ANON":
             if pilot_id in ALL_PILOT_SNAPSHOTS:
+                # Remove o piloto do monitor de voos ativos
                 del ALL_PILOT_SNAPSHOTS[pilot_id]
             if pilot_id in PILOT_CONNECTIONS:
                 del PILOT_CONNECTIONS[pilot_id]
         
         USERS.remove(websocket)
+        # CHAVE: Forçar a atualização dos arquivos de monitoramento após a desconexão
+        if ALL_PILOT_SNAPSHOTS:
+             # Pega um snapshot válido para forçar a atualização da lista de pilotos
+             data_to_update = next(iter(ALL_PILOT_SNAPSHOTS.values()))
+        else:
+             # Se a lista estiver vazia, usa um snapshot vazio para limpar a lista HTML
+             data_to_update = {"alt_ind": 0, "vs": 0, "ias": 0, "eng_combustion": 0, "vatsim_id": "N/A", "ivao_id": "N/A", "pilot_id": "N/A", "packets_sent": 0, "mb_sent": 0.0}
+        
+        update_monitor_files(data_to_update, packets_received_count, total_bytes_received)
         print(f"[{datetime.now().strftime('%H:%M:%S')}] CLIENTE DESCONECTADO: {websocket.remote_address}. Total: {len(USERS)}")
 
 
@@ -160,22 +170,26 @@ async def network_status_checker_loop():
 
             try:
                 is_online = check_network_status(vatsim_id, ivao_id)
+                # CHAVE: Se a flag 'tx_sent' for o estado atual de online/offline, evitamos comandos repetidos.
+                is_transmitting = conn_data['tx_sent']
 
                 if is_online:
-                    # Piloto ONLINE: Mantém a conexão aberta. Envia START_TX APENAS se ainda não foi enviado.
-                    if not conn_data['tx_sent']:
+                    # PILOTO ONLINE: Se não estava transmitindo, envia START_TX
+                    if not is_transmitting:
                          command = json.dumps({"command": "START_TX"})
                          await ws.send(command)
                          conn_data['tx_sent'] = True
-                         print(f"[{datetime.now().strftime('%H:%M:%S')}] [SERVER CHECK] Piloto {pilot_id} ONLINE. Comando START_TX enviado (Heartbeat ÚNICO).")
-                    
-                    # Se 'tx_sent' for True, não faz mais nada. O cliente continua transmitindo.
+                         print(f"[{datetime.now().strftime('%H:%M:%S')}] [SERVER CHECK] Piloto {pilot_id} ONLINE. Comando START_TX enviado.")
                     
                 else:
-                    # Piloto OFFLINE: Fecha a conexão
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [SERVER CHECK] Piloto {pilot_id} OFFLINE em IVAO/VATSIM. Fechando conexão.")
-                    await ws.close()
-                    pilots_to_remove.append(pilot_id)
+                    # PILOTO OFFLINE: Se estava transmitindo, envia STOP_TX e atualiza a flag.
+                    if is_transmitting:
+                        command = json.dumps({"command": "STOP_TX"})
+                        await ws.send(command)
+                        conn_data['tx_sent'] = False
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] [SERVER CHECK] Piloto {pilot_id} OFFLINE em IVAO/VATSIM. Comando STOP_TX enviado (Conexão mantida).")
+                    
+                    # Se já estava em STOP_TX, não faz nada, apenas espera que ele volte a ficar online.
             
             except websockets.ConnectionClosed:
                 pilots_to_remove.append(pilot_id)
@@ -203,25 +217,32 @@ def generate_estimated_data_table(average_rate_mbh):
 
 def generate_pilot_summary_rows():
     """Gera as linhas HTML para a tabela resumo de todos os pilotos ativos."""
-    global ALL_PILOT_SNAPSHOTS
+    global ALL_PILOT_SNAPSHOTS, PILOT_CONNECTIONS
     rows_html = ""
     
     if not ALL_PILOT_SNAPSHOTS:
         return '<tr><td colspan="6" style="text-align:center; color: #95a5a6;">Nenhum voo ativo no momento.</td></tr>'
 
     for pilot_id, data in ALL_PILOT_SNAPSHOTS.items():
+        # Verifica o status de transmissão para fins de exibição no HTML
+        conn_status = PILOT_CONNECTIONS.get(pilot_id, {}).get('tx_sent', False) 
+        
         # Dados essenciais para o resumo
         alt = format_number(data.get('alt_ind', 0), 0); vs = format_number(data.get('vs', 0), 0); ias = format_number(data.get('ias', 0), 0); vatsim = data.get('vatsim_id', 'N/A')
         
         # Lógica de Status Visual
-        is_airborne = data.get('on_ground', 1) == 0 and data.get('alt_ind', 0) > 100
-        is_taxiing = data.get('on_ground', 1) == 1 and data.get('ias', 0) > 5 and data.get('eng_combustion', 0) == 1
-        is_cold = data.get('eng_combustion', 0) == 0
-        
-        if is_airborne: status_text = "EM VOO"; status_class = "status-airborne"
-        elif is_taxiing: status_text = "TAXIANDO"; status_class = "status-taxiing"
-        elif not is_cold: status_text = "EM SOLO (Engine On)"; status_class = "status-ready"
-        else: status_text = "OFFLINE/COLD"; status_class = "status-cold"
+        if not conn_status:
+             status_text = "PAUSADO (Offline Rede)"
+             status_class = "status-cold"
+        else:
+            is_airborne = data.get('on_ground', 1) == 0 and data.get('alt_ind', 0) > 100
+            is_taxiing = data.get('on_ground', 1) == 1 and data.get('ias', 0) > 5 and data.get('eng_combustion', 0) == 1
+            is_cold = data.get('eng_combustion', 0) == 0
+            
+            if is_airborne: status_text = "EM VOO"; status_class = "status-airborne"
+            elif is_taxiing: status_text = "TAXIANDO"; status_class = "status-taxiing"
+            elif not is_cold: status_text = "EM SOLO (Engine On)"; status_class = "status-ready"
+            else: status_text = "OFFLINE/COLD"; status_class = "status-cold"
              
         rows_html += f"""
                 <tr class="pilot-row {status_class}">
@@ -541,15 +562,24 @@ async def handle_flight_data(websocket):
                     PILOT_CONNECTIONS[pilot_id]['tx_sent'] = True # Marca como enviado
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] [SERVER CHECK] Piloto {pilot_id} ONLINE (Check Imediato). Comando START_TX enviado (ÚNICO).")
                 else:
-                    # Piloto OFFLINE: Fecha a conexão
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [SERVER CHECK] Piloto {pilot_id} OFFLINE (Check Imediato). Fechando conexão.")
-                    await websocket.close()
-                    return # Encerra o handler
+                    # Piloto OFFLINE: Envia STOP_TX e mantém a conexão aberta
+                    command = json.dumps({"command": "STOP_TX"})
+                    await websocket.send(command)
+                    PILOT_CONNECTIONS[pilot_id]['tx_sent'] = False # Marca como parado
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [SERVER CHECK] Piloto {pilot_id} OFFLINE (Check Imediato). Comando STOP_TX enviado (Conexão mantida).")
+
 
             # Se o cliente enviou um pacote de dados, é porque o servidor enviou START_TX.
-            # O processamento de dados só continua se o piloto estiver na lista de conexões ativas.
+            # O processamento de dados só continua se o piloto estiver na lista de conexões ativas E 'tx_sent' for True.
             if pilot_id not in PILOT_CONNECTIONS:
                 continue # Piloto não registrado ou recém-desconectado.
+            
+            # CHAVE: Só processa a lógica de eventos e a escrita dos arquivos se estivermos transmitindo
+            # Se o piloto estiver offline da rede virtual, o último pacote (de identificação ou anterior) será mantido.
+            if not PILOT_CONNECTIONS[pilot_id]['tx_sent']:
+                # Se o cliente enviar dados sem permissão, ignoramos e esperamos.
+                continue
+
 
             # LOG CONCISO DE DEBUG
             altitude = data.get("alt_ind", 0); ias = data.get("ias", 0); vs = data.get('vs', 0); bank = data.get('plane_bank_degrees', 0)
