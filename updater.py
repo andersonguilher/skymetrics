@@ -13,7 +13,7 @@ from tkinter import messagebox, Tk
 
 # --- CONSTANTES DE CONFIGURAÇÃO ---
 # ATUALIZADO: URL agora aponta para o pacote ZIP de atualização
-UPDATE_DOWNLOAD_URL = "https://kafly.com.br/skymetrics/SkyMetricsMonitor_Update_Package.zip"
+UPDATE_DOWNLOAD_URL = "https://kafly.com.br/skymetrics/update/SkyMetricsMonitor_Update_Package.zip"
 MAIN_EXE_NAME = "SkyMetricsMonitor.exe"
 # ATUALIZADO: Nome do arquivo a ser baixado
 UPDATE_PACKAGE_NAME = "SkyMetricsMonitor_Update_Package.zip"

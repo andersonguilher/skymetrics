@@ -38,7 +38,7 @@ if CLIENT_LOGIN_SECTION not in config: config[CLIENT_LOGIN_SECTION] = {}
 
 # --- NOVAS CONFIGURAÇÕES DE ATUALIZAÇÃO ---
 CURRENT_VERSION = "1.0.0"  # Defina a versão atual do seu cliente aqui
-VERSION_CHECK_URL = "https://kafly.com.br/skymetrics/current_version.txt"
+VERSION_CHECK_URL = "https://kafly.com.br/skymetrics/update/current_version.txt"
 UPDATE_CHECK_INTERVAL_MS = 900000 # 15 minutos (15 * 60 * 1000)
 
 # CARREGAR VARIÁVEIS DO INI
