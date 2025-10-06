@@ -1,4 +1,4 @@
-# login_client_kafly.py (FINAL: Cliente Completo com Configuração Externa)
+# login_client_kafly.py (FINAL: Cliente Completo com Configuração Externa e Auto-Updater)
 
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
@@ -13,6 +13,8 @@ import sys
 import time
 import random
 from copy import deepcopy 
+from subprocess import Popen
+from tkinter import messagebox
 
 # --- Módulos de WebSocket e Threading ---
 import websocket
@@ -33,6 +35,11 @@ config.read(CONFIG_FILE)
 # Lógica de fallback para garantir que as seções existam
 if CLIENT_CONFIG_SECTION not in config: config[CLIENT_CONFIG_SECTION] = {}
 if CLIENT_LOGIN_SECTION not in config: config[CLIENT_LOGIN_SECTION] = {}
+
+# --- NOVAS CONFIGURAÇÕES DE ATUALIZAÇÃO ---
+CURRENT_VERSION = "1.0.0"  # Defina a versão atual do seu cliente aqui
+VERSION_CHECK_URL = "https://kafly.com.br/dash/skymetrics/current_version.txt"
+UPDATE_CHECK_INTERVAL_MS = 900000 # 15 minutos (15 * 60 * 1000)
 
 # CARREGAR VARIÁVEIS DO INI
 KEYRING_SERVICE_ID = config.get(CLIENT_CONFIG_SECTION, 'keyring_service_id', fallback='KAFY_Pilot_Password')
@@ -87,8 +94,6 @@ def get_validated_pilot_data(email: str) -> dict | None:
             if pilot.get('_email_contato', '').lower() == email.lower(): return pilot
         return None
     except Exception: return None
-
-# OBS: Funções de check_network_status foram removidas.
 
 def load_credentials() -> tuple[str, str, bool]:
     email, password, remember_me = "", "", False
@@ -430,11 +435,11 @@ class LoginFormFrame(ttk.Frame):
 class MainApplication(ttk.Window):
     def __init__(self):
         super().__init__(themename="darkly")
-        self.title(f"Monitor de Voo - Login {VA_KEY}"); self.geometry("450x480"); self.resizable(False, False)
+        self.title(f"Skymetrics - Login {VA_KEY}"); self.geometry("300x480"); self.resizable(False, False)
         
         # --- DEFINIÇÃO DO ÍCONE DA APLICAÇÃO ---
         try:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
+            base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
             icon_path = os.path.join(base_dir, 'assets', 'icons', 'skymetrics.ico')
             self.iconbitmap(icon_path)
         except Exception as e:
@@ -446,12 +451,69 @@ class MainApplication(ttk.Window):
         self.current_pilot_email = None # Para gerenciar o logoff
         self.protocol("WM_DELETE_WINDOW", self._on_app_closing)
         
+        # --- NOVO: Label da Versão no Rodapé ---
+        self.version_label = ttk.Label(self, text=f"Versão {CURRENT_VERSION}", font=("-size 8"), bootstyle="secondary")
+        self.version_label.pack(side=BOTTOM, pady=(0, 5))
+
+        # --- LÓGICA DE ATUALIZAÇÃO ---
+        self.after(1000, self._start_update_checker) # Inicia a verificação após 1 segundo
+
         # Tenta Login Automático
         email, password, remember_me = load_credentials()
         if email and password and remember_me:
              self._attempt_auto_login(email, password)
         else:
             self._show_login_form()
+
+    # --- NOVAS FUNÇÕES PARA O UPDATER ---
+    def _start_update_checker(self):
+        """Inicia a verificação de atualizações em background e a agenda."""
+        threading.Thread(target=self.check_for_updates, daemon=True).start()
+        self.after(UPDATE_CHECK_INTERVAL_MS, self._start_update_checker)
+
+    def is_new_version_available(self, current_v_str: str, server_v_str: str) -> bool:
+        """Compara duas strings de versão (ex: '1.0.1' > '1.0.0')."""
+        try:
+            current_parts = list(map(int, current_v_str.split('.')))
+            server_parts = list(map(int, server_v_str.split('.')))
+            return server_parts > current_parts
+        except (ValueError, IndexError):
+            return False # Em caso de formato inválido, não atualiza
+
+    def check_for_updates(self):
+        """Busca a versão no servidor e, se for mais nova, inicia o processo de atualização."""
+        try:
+            response = requests.get(VERSION_CHECK_URL, timeout=10)
+            response.raise_for_status()
+            server_version = response.text.strip()
+            
+            if self.is_new_version_available(CURRENT_VERSION, server_version):
+                print(f"Nova versão encontrada: {server_version}. Versão atual: {CURRENT_VERSION}")
+                
+                # Usa 'after' para garantir que a UI seja atualizada a partir da thread principal
+                self.after(0, self.initiate_update, server_version)
+        except requests.exceptions.RequestException as e:
+            print(f"Não foi possível verificar atualizações: {e}")
+        except Exception as e:
+            print(f"Erro inesperado ao verificar atualizações: {e}")
+
+    def initiate_update(self, new_version: str):
+        """Avisa o usuário e executa o updater."""
+        if messagebox.askokcancel("Atualização Disponível", 
+                                  f"Uma nova versão ({new_version}) do SkyMetrics está disponível.\n\n"
+                                  "O aplicativo será fechado para iniciar a atualização. Deseja continuar?"):
+            try:
+                # O updater.exe deve estar na mesma pasta que o executável principal
+                updater_path = os.path.join(os.path.dirname(sys.executable), "updater.exe")
+                
+                if not os.path.exists(updater_path):
+                     messagebox.showerror("Erro", "updater.exe não encontrado! A atualização não pode continuar.")
+                     return
+                
+                Popen([updater_path, new_version])
+                self._on_app_closing() # Fecha a aplicação principal
+            except Exception as e:
+                messagebox.showerror("Erro ao Atualizar", f"Não foi possível iniciar o atualizador: {e}")
 
     def _attempt_auto_login(self, email: str, password: str):
         """Inicia o formulário e tenta logar automaticamente."""
@@ -481,7 +543,8 @@ class MainApplication(ttk.Window):
         if self.current_frame: self.current_frame.destroy()
         
         # Redefine o tamanho para a tela de login
-        self.geometry("450x480") 
+        self.geometry("300x480") 
+        self.title(f"Skymetrics - Login {VA_KEY}")
         
         self.login_frame = LoginFormFrame(self, on_success=self._on_login_success) 
         self.login_frame.pack(fill=BOTH, expand=YES)
@@ -494,8 +557,8 @@ class MainApplication(ttk.Window):
         # Salva o email do piloto logado
         self.current_pilot_email = email
         
-        self.geometry("400x200") # Novo tamanho para a tela do monitor
-        self.title(f"Monitor de Voo {VA_KEY} - ID: {numeric_id}")
+        self.geometry("300x200") # Novo tamanho para a tela do monitor
+        self.title(f"Skymetrics {VA_KEY} - ID: {numeric_id} (v{CURRENT_VERSION})")
         
         # Inicializa e inicia o monitor
         self.monitor = FlightMonitor(email, numeric_id, pilot_data)
@@ -508,7 +571,7 @@ class MainApplication(ttk.Window):
         monitor_frame.pack(fill=BOTH, expand=YES)
         self.current_frame = monitor_frame
         
-        ttk.Label(monitor_frame, text=f"Transmissão iniciada para ID: {numeric_id}", font=("TkDefaultFont", 12, "bold")).pack(pady=(10, 5))
+        ttk.Label(monitor_frame, text=f"Conectado ID: {numeric_id}", font=("TkDefaultFont", 12, "bold")).pack(pady=(10, 5))
         ttk.Label(monitor_frame, text=f"Status SimConnect: {CONN_STATUS}", font=("TkDefaultFont", 10), bootstyle="info").pack(pady=5)
         
         # Botão de Logoff
