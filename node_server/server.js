@@ -8,8 +8,8 @@ const axios = require('axios');
 // =========================================================
 const HOST = "0.0.0.0";
 const PORT = 8765;
-const HTML_FILE_PATH = "/var/www/kafly_user/data/www/kafly.com.br/dash/utils/t.php";
-const JSON_FILE_PATH = "/var/www/kafly_user/data/www/kafly.com.br/dash/utils/t.json";
+const HTML_FILE_PATH = "/var/www/kafly_user/data/www/kafly.com.br/skymetrics/index.php";
+const JSON_FILE_PATH = "/var/www/kafly_user/data/www/kafly.com.br/skymetrics/whazzup.json";
 
 // Contadores e Variáveis de Estado
 let packetsReceivedCount = 0;
@@ -122,7 +122,7 @@ function generatePilotSummaryRows() {
 async function generateRealtimeDataJson(data) {
     if ((new Date() - LAST_JSON_UPDATE_TIME) < 60000) return; // 60 segundos
     LAST_JSON_UPDATE_TIME = new Date();
-    log(`[JSON_WRITE] Atualizando t.json para Lat/Lng.`);
+    log(`[JSON_WRITE] Atualizando whazzup.json para Lat/Lng.`);
 
     const timeElapsedHours = (new Date() - SERVER_START_TIME) / 3600000;
     const totalMbReceived = totalBytesReceived / (1024 * 1024);
@@ -198,7 +198,7 @@ async function updateMonitorFiles(data) {
         <div id="map"></div>
         <script>
             var map, marker = null, initialLat = 0.0, initialLng = 0.0;
-            const JSON_URL = 't.json';
+            const JSON_URL = 'whazzup.json';
             async function fetchInitialData() {
                 try {
                     const response = await fetch(JSON_URL + '?t=' + new Date().getTime());
@@ -242,7 +242,7 @@ async function updateMonitorFiles(data) {
                     }
                     document.getElementById('pacotes-recebidos').textContent = data.packets_received_count;
                 } catch (error) {
-                    console.warn("Aguardando dados em t.json ou erro de leitura.", error.message);
+                    console.warn("Aguardando dados em whazzup.json ou erro de leitura.", error.message);
                 }
             }
             window.onload = fetchInitialData;
@@ -262,7 +262,7 @@ async function updateMonitorFiles(data) {
             <tbody>${estimatedTableRows}</tbody>
         </table>
         <p style="text-align: center; font-size: 0.8em; margin-top: 20px; color: #95a5a6;">
-            Dados do mapa atualizados em tempo real via t.json. O servidor atualiza o t.json a cada 60 segundos.
+            Dados do mapa atualizados em tempo real via whazzup.json. O servidor atualiza o whazzup.json a cada 60 segundos.
         </p>
     </div>
 </body>
