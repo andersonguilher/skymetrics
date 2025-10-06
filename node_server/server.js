@@ -378,8 +378,8 @@ async function generateRealtimeDataJson(data, received_count, total_bytes_receiv
     const now = new Date();
     const timeSinceLastUpdate = now.getTime() - LAST_JSON_UPDATE_TIME.getTime();
 
-    // CORREÇÃO: Verifica se já se passaram 5 segundos (5000 ms) desde a última atualização
-    if (timeSinceLastUpdate < 5000) {
+    // MODIFICAÇÃO: Verifica se já se passaram 60 segundos (60000 ms) desde a última atualização
+    if (timeSinceLastUpdate < 60000) {
         return; // Não atualiza o arquivo JSON
     }
 
@@ -658,7 +658,7 @@ async function updateMonitorFiles(data, received_count, total_bytes_received) {
         </table>
         
         <p style="text-align: center; font-size: 0.8em; margin-top: 20px; color: #95a5a6;">
-            Dados do mapa atualizados em tempo real via whazzup.json. O servidor atualiza o whazzup.json a cada 5 segundos.
+            Dados do mapa atualizados em tempo real via whazzup.json. O servidor atualiza o whazzup.json a cada 60 segundos.
         </p>
     </div>
 </body>

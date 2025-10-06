@@ -1,4 +1,4 @@
-# login_client_kafly.py (FINAL: Cliente Completo com Configuração Externa)
+# login_client_kafly.py (FINAL: Cliente Completo com Configuração Externa e Auto-Update)
 
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
@@ -19,12 +19,24 @@ import websocket
 import threading
 from datetime import datetime
 
+# NOVO: Módulos para atualização
+from subprocess import Popen 
+from threading import Lock 
+from tkinter import messagebox # Usar messagebox do tkinter
+
 # =================================================================
-# 1. CONFIGURAÇÕES E ENDPOINTS (Lidos do .ini)
+# 1. CONSTANTES E CONFIGURAÇÃO
 # =================================================================
 CONFIG_FILE = 'client_config.ini'
 CLIENT_CONFIG_SECTION = 'CLIENT_CONFIG' 
 CLIENT_LOGIN_SECTION = 'LOGIN_CREDENTIALS'
+
+# NOVO: VERSÃO ATUAL E LÓGICA DE ATUALIZAÇÃO
+CURRENT_VERSION = "1.0.0" 
+# CORREÇÃO DA URL SOLICITADA PELO USUÁRIO
+UPDATE_CHECK_URL = "https://kafly.com.br/skymetrics/update/current_version.txt"
+UPDATE_EXECUTABLE_NAME = "updater.exe" 
+UPDATE_CHECK_LOCK = Lock()
 
 # --- Carregar Configurações do Arquivo ---
 config = configparser.ConfigParser()
@@ -51,20 +63,120 @@ aq = None
 last_sent_data = None 
 
 # PRECISION MAP: Define a precisão funcional de cada métrica
-# Lat/Lng e G_Force reduzidos para evitar jitter constante no solo.
 DATA_PRECISION = { 
     "alt_ind": 0, "vs": 0, "ias": 1, "tas": 1, "agl": 0, "on_ground": 0, 
-    "total_fuel": 0, "gear_left_pos": 0, "g_force": 1, # DE 2 PARA 1
+    "total_fuel": 0, "gear_left_pos": 0, "g_force": 1, 
     "engine_count": 0, 
-    "lat": 3, "lng": 3, # DE 4 PARA 3
+    "lat": 3, "lng": 3, 
     "eng_combustion": 0, "light_beacon_on": 0, "light_landing_on": 0, "light_strobe_on": 0, "plane_bank_degrees": 1, 
     "engine_vibration_1": 0,
 }
 
 # =================================================================
-# 2. LÓGICA DE AUTENTICAÇÃO, ID e CREDENCIAIS
+# 2. FUNÇÕES DE LÓGICA DE ATUALIZAÇÃO (Adaptadas do main.py)
 # =================================================================
 
+def _compare_versions(current_v, latest_v):
+    """Compara duas strings de versão (ex: '1.0.0' vs '1.0.1').
+    Retorna True se latest_v > current_v."""
+    try:
+        current_parts = [int(p) for p in current_v.split('.')]
+        latest_parts = [int(p) for p in latest_v.split('.')]
+        
+        max_len = max(len(current_parts), len(latest_parts))
+        current_parts += [0] * (max_len - len(current_parts))
+        latest_parts += [0] * (max_len - len(latest_parts))
+        
+        for i in range(max_len):
+            if latest_parts[i] > current_parts[i]:
+                return True
+            if latest_parts[i] < current_parts[i]:
+                return False
+        return False
+        
+    except Exception as e:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [ERRO] ao comparar versões: {e}")
+        return False
+
+def initiate_update_and_exit(app_instance, latest_version):
+    """Inicia o updater.exe e fecha o aplicativo principal. 
+    Garanti que esta função só é chamada na thread da GUI."""
+    
+    if app_instance._update_in_progress:
+        return
+
+    message = (
+        f"Uma nova versão ({latest_version}) do Cliente Monitor está disponível (versão atual: {CURRENT_VERSION}).\n\n"
+        "⚠️ ATENÇÃO: Esta é uma atualização crítica. Não atualizar pode resultar em erros de conexão.\n\n"
+        "O aplicativo será fechado imediatamente para iniciar o processo de atualização automática.\n\n"
+        "Deseja atualizar agora?"
+    )
+    
+    if not messagebox.askyesno("Atualização Crítica Disponível", message):
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [AVISO] Atualização de {latest_version} IGNORADA pelo usuário.")
+        return
+
+    app_instance._update_in_progress = True
+    
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] [INFO] Iniciando processo de atualização...")
+    
+    app_instance.stop_monitor_and_simconnect()
+    
+    try:
+        Popen([UPDATE_EXECUTABLE_NAME, latest_version])
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [SUCESSO] Executado {UPDATE_EXECUTABLE_NAME} com argumento {latest_version}. Encerrando o Monitor.")
+    except FileNotFoundError:
+         print(f"[{datetime.now().strftime('%H:%M:%S')}] [ERRO] O arquivo {UPDATE_EXECUTABLE_NAME} não foi encontrado. Atualização abortada.")
+    except Exception as e:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [ERRO] ao executar o updater: {e}")
+    
+    app_instance.destroy()
+
+def check_for_update(app_instance, silent=False):
+    """Verifica a versão mais recente e inicia a atualização se necessário."""
+    
+    with UPDATE_CHECK_LOCK:
+        try:
+            # Garante que a aplicação ainda está ativa e não está atualizando
+            if not app_instance.winfo_exists() or app_instance._update_in_progress:
+                return False 
+                
+            if not silent:
+                 print(f"[{datetime.now().strftime('%H:%M:%S')}] [INFO] Checando por novas versões em {UPDATE_CHECK_URL}...")
+                 
+            response = requests.get(UPDATE_CHECK_URL, timeout=5)
+            response.raise_for_status()
+            
+            latest_version = response.text.strip()
+            
+            if _compare_versions(CURRENT_VERSION, latest_version):
+                if not silent:
+                    # Apenas loga a descoberta, a função initiate_update_and_exit fará o diálogo e encerramento.
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [ALERTA] Nova versão {latest_version} disponível (atual: {CURRENT_VERSION}). Iniciando diálogo...")
+                
+                # CHAVE DA CORREÇÃO: Chama initiate_update_and_exit APENAS na thread da GUI
+                # A flag `_update_in_progress` impede chamadas repetidas enquanto o diálogo está aberto.
+                app_instance.after(0, initiate_update_and_exit, app_instance, latest_version)
+                
+                return True
+            else:
+                if not silent:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [INFO] A versão atual ({CURRENT_VERSION}) é a mais recente.")
+                return False
+                
+        except requests.exceptions.RequestException as e:
+            if not silent:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] [AVISO] Falha ao verificar atualização (Conexão/Timeout): {e}")
+            return False
+        except Exception as e:
+            if not silent:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] [ERRO] inesperado ao verificar atualização: {e}")
+            return False
+
+# =================================================================
+# 3. LÓGICA DE AUTENTICAÇÃO, ID e CREDENCIAIS
+# =================================================================
+# ... (Funções de login e credenciais permanecem inalteradas)
 def generate_pilot_numeric_id(email: str) -> int:
     email_bytes = email.lower().encode('utf-8')
     return zlib.crc32(email_bytes) & 0xFFFFFFFF 
@@ -87,8 +199,6 @@ def get_validated_pilot_data(email: str) -> dict | None:
             if pilot.get('_email_contato', '').lower() == email.lower(): return pilot
         return None
     except Exception: return None
-
-# OBS: Funções de check_network_status foram removidas.
 
 def load_credentials() -> tuple[str, str, bool]:
     email, password, remember_me = "", "", False
@@ -134,8 +244,9 @@ def delete_credentials(email: str, clear_email: bool = True):
         with open(CONFIG_FILE, 'w') as configfile: config.write(configfile)
     except Exception as e: print(f"Erro ao deletar credenciais: {e}")
 
+
 # =================================================================
-# 3. LÓGICA DO CLIENTE WEBSOCKET (Coleta de Dados Completos)
+# 4. CLASSES DO CLIENTE WEBSOCKET E GUI
 # =================================================================
 
 # --- MOCKUP / SIMCONNECT SETUP ---
@@ -245,7 +356,7 @@ def has_significant_change(current_data, last_data):
     return current_data != last_data
 
 # =================================================================
-# 4. CLASSE MONITOR E GUI
+# 5. CLASSE MONITOR E GUI
 # =================================================================
 
 class FlightMonitor:
@@ -277,7 +388,7 @@ class FlightMonitor:
             )
             self.ws_client.run_forever() 
             if self.running:
-                print(f"[WS] Conexão perdida. Tentando reconectar em {RETRY_DELAY} segundos..."); self.last_sent_data = None 
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS] Conexão perdida. Tentando reconectar em {RETRY_DELAY} segundos..."); self.last_sent_data = None 
                 time.sleep(RETRY_DELAY)
 
     def _on_open(self, ws):
@@ -325,8 +436,6 @@ class FlightMonitor:
             
             # GATE PRINCIPAL: Aguarda o comando START_TX do servidor
             if not self.transmitting:
-                # O cliente envia um pacote de identificação e aguarda a permissão do servidor.
-                # Não faz sentido enviar dados do SimConnect se a permissão não foi dada.
                 time.sleep(1) # Espera 1 segundo e checa novamente
                 continue 
             
@@ -430,15 +539,18 @@ class LoginFormFrame(ttk.Frame):
 class MainApplication(ttk.Window):
     def __init__(self):
         super().__init__(themename="darkly")
-        self.title(f"Monitor de Voo - Login {VA_KEY}"); self.geometry("450x480"); self.resizable(False, False)
+        self.title(f"Monitor de Voo - Login {VA_KEY}"); self.geometry("300x480"); self.resizable(False, False)
+        
+        # NOVO: Flag para controle da atualização
+        self._update_in_progress = False 
         
         # --- DEFINIÇÃO DO ÍCONE DA APLICAÇÃO ---
         try:
+            # Assume que os caminhos são relativos ao script principal (client.py)
             base_dir = os.path.dirname(os.path.abspath(__file__))
             icon_path = os.path.join(base_dir, 'assets', 'icons', 'skymetrics.ico')
             self.iconbitmap(icon_path)
         except Exception as e:
-            # print(f"Aviso: Não foi possível carregar o ícone {icon_path}: {e}")
             pass
             
         self.monitor = None
@@ -446,12 +558,47 @@ class MainApplication(ttk.Window):
         self.current_pilot_email = None # Para gerenciar o logoff
         self.protocol("WM_DELETE_WINDOW", self._on_app_closing)
         
+        # CORREÇÃO: Removendo a checagem imediata na thread de background para evitar duplicação.
+        # Agora, a checagem periódica (agendada) fará a primeira verificação após 1 segundo.
+        
+        # NOVO: Inicia o loop de verificação de atualização periódica
+        self.after(1000, self.start_periodic_update_check)
+        
         # Tenta Login Automático
         email, password, remember_me = load_credentials()
         if email and password and remember_me:
              self._attempt_auto_login(email, password)
         else:
             self._show_login_form()
+
+    # NOVO: Método auxiliar para parar monitoramento e SimConnect
+    def stop_monitor_and_simconnect(self):
+        """Encerra o monitor de forma segura e a conexão SimConnect."""
+        global sm, CONN_STATUS
+        
+        if self.monitor:
+            self.monitor.running = False
+            
+        if CONN_STATUS == "REAL" and sm: 
+            try:
+                sm.exit()
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] [INFO] Conexão SimConnect encerrada.")
+            except Exception as e:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] [AVISO] Falha ao fechar SimConnect: {e}")
+
+    # NOVO: Método para checagem de atualização periódica
+    def start_periodic_update_check(self):
+        """Inicia o loop de checagem de atualização a cada 5 minutos (300 segundos)."""
+        # Verifica se a janela ainda existe e se a atualização não foi iniciada
+        if not self.winfo_exists() or self._update_in_progress:
+            return
+
+        # Cria a thread de checagem em modo silencioso
+        # O `check_for_update` (externo) usará a flag `_update_in_progress` para se proteger.
+        threading.Thread(target=check_for_update, args=(self, True), daemon=True).start()
+        
+        # Agenda a próxima checagem para daqui a 5 minutos
+        self.after(60 * 60 * 1000, self.start_periodic_update_check)
 
     def _attempt_auto_login(self, email: str, password: str):
         """Inicia o formulário e tenta logar automaticamente."""
@@ -472,8 +619,12 @@ class MainApplication(ttk.Window):
 
 
     def _on_app_closing(self):
-        if self.monitor: self.monitor.running = False;
-        if CONN_STATUS == "REAL": sm.exit() 
+        # Verifica se está atualizando antes de tentar fechar SimConnect/Monitor
+        if self._update_in_progress:
+             self.destroy()
+             return
+             
+        self.stop_monitor_and_simconnect()
         self.destroy()
 
     def _show_login_form(self):
@@ -481,7 +632,7 @@ class MainApplication(ttk.Window):
         if self.current_frame: self.current_frame.destroy()
         
         # Redefine o tamanho para a tela de login
-        self.geometry("450x480") 
+        self.geometry("300x480") 
         
         self.login_frame = LoginFormFrame(self, on_success=self._on_login_success) 
         self.login_frame.pack(fill=BOTH, expand=YES)
@@ -494,7 +645,7 @@ class MainApplication(ttk.Window):
         # Salva o email do piloto logado
         self.current_pilot_email = email
         
-        self.geometry("400x200") # Novo tamanho para a tela do monitor
+        self.geometry("350x200") # Novo tamanho para a tela do monitor
         self.title(f"Monitor de Voo {VA_KEY} - ID: {numeric_id}")
         
         # Inicializa e inicia o monitor
@@ -518,13 +669,11 @@ class MainApplication(ttk.Window):
     def _handle_logoff(self):
         """Encerra o monitor, apaga a senha e desativa o autologin, mantendo o email."""
         
-        # 1. Encerra o monitor de forma segura
-        if self.monitor:
-            self.monitor.running = False
+        # 1. Encerra o monitor de forma segura e o SimConnect
+        self.stop_monitor_and_simconnect()
         
         # 2. Apaga a senha e desativa o autologin, MANTENDO O EMAIL.
         if self.current_pilot_email:
-            # Usando clear_email=False para manter o email no .ini
             delete_credentials(self.current_pilot_email, clear_email=False)
             print("-" * 50); print(f"Logoff bem-sucedido. A senha de '{self.current_pilot_email}' foi removida. O email foi mantido para a próxima vez."); print("-" * 50)
 
