@@ -3,3 +3,4 @@ dist/
 build/
 SkyMetricsMonitor.spec
 client/client_config.ini
+node_server/node_modules/
