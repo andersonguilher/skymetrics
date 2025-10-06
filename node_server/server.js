@@ -204,10 +204,12 @@ async function updateMonitorFiles(data) {
                     const response = await fetch(JSON_URL + '?t=' + new Date().getTime());
                     const data = await response.json();
                     initialLat = data.lat; initialLng = data.lng;
-                    initMap(); setInterval(updateMarkerPosition, 2000);
+                    initMap(); 
+                    setInterval(updateMarkerPosition, 2000);
                 } catch (error) {
                     console.error("Erro ao carregar dados iniciais do mapa:", error);
-                    initMap(); setInterval(updateMarkerPosition, 2000);
+                    initMap(); 
+                    setInterval(updateMarkerPosition, 2000);
                 }
             }
             function initMap() {
@@ -216,18 +218,29 @@ async function updateMonitorFiles(data) {
                 var mapCenter = [initialLat || -23.5505, initialLng || -46.6333];
                 map = L.map('map').setView(mapCenter, 10);
                 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
-                marker = L.marker(mapCenter).addTo(map).bindPopup('Aguardando dados...').openPopup();
+                if (initialLat !== 0 && initialLng !== 0) {
+                    marker = L.marker(mapCenter).addTo(map).bindPopup('Aguardando dados...').openPopup();
+                }
             }
             async function updateMarkerPosition() {
                 try {
                     const response = await fetch(JSON_URL + '?t=' + new Date().getTime());
                     const data = await response.json();
+                    if (data.lat === 0 && data.lng === 0) {
+                        if (marker) {
+                            map.removeLayer(marker);
+                            marker = null;
+                        }
+                        return;
+                    }
                     var newLatLng = L.latLng(data.lat, data.lng);
                     if (marker) {
                         marker.setLatLng(newLatLng);
                         marker.getPopup().setContent(\`<b>Piloto: \${data.pilot_id}</b><br>Alt: \${data.alt_ind} ft<br>IAS: \${data.ias} kts\`);
-                        document.getElementById('pacotes-recebidos').textContent = data.packets_received_count;
+                    } else {
+                        marker = L.marker(newLatLng).addTo(map).bindPopup(\`<b>Piloto: \${data.pilot_id}</b><br>Alt: \${data.alt_ind} ft<br>IAS: \${data.ias} kts\`).openPopup();
                     }
+                    document.getElementById('pacotes-recebidos').textContent = data.packets_received_count;
                 } catch (error) {
                     console.warn("Aguardando dados em t.json ou erro de leitura.", error.message);
                 }
