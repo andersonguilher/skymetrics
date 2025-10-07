@@ -12,7 +12,9 @@ import { fileURLToPath } from 'url';
 const HOST = "0.0.0.0";
 const PORT = 8765;
 // *** CAMINHOS E NOMES DE ARQUIVOS DEFINITIVOS ***
+// O caminho do arquivo PHP que será atualizado com o resumo e o JS do mapa.
 const HTML_FILE_PATH = "/var/www/kafly_user/data/www/kafly.com.br/skymetrics/index.php";
+// O arquivo JSON que será lido pelo AJAX na página PHP (dados em tempo real).
 const JSON_FILE_PATH = "/var/www/kafly_user/data/www/kafly.com.br/skymetrics/whazzup.json";
 // **********************************************************
 
@@ -22,18 +24,18 @@ let totalBytesReceived = 0.0;
 
 // Variáveis de Estado
 let SERVER_START_TIME = null;
-const USERS = new Set(); // Conjunto de conexões WebSocket
+const USERS = new Set();
 const WORST_CASE_RATE_MBH = 12.3;
-const CLIENT_FLIGHT_STATES = {}; // {pilot_id: {is_airborne: bool, ...}}
-const ALL_PILOT_SNAPSHOTS = {}; // {pilot_id: {data_completa}}
-let LAST_JSON_UPDATE_TIME = new Date(0); // CHAVE: Tempo da última atualização do JSON (equivalente a datetime.min)
+const CLIENT_FLIGHT_STATES = {};
+const ALL_PILOT_SNAPSHOTS = {};
+let LAST_JSON_UPDATE_TIME = new Date(0);
 
 // Variáveis para verificação de rede (Controle do Servidor)
 const IVAO_DATA_URL = "https://api.ivao.aero/v2/tracker/whazzup";
 const VATSIM_DATA_URL = "https://data.vatsim.net/v3/vatsim-data.json";
-const NETWORK_CHECK_INTERVAL_SERVER = 120 * 1000; // milissegundos (2 minutos)
+const NETWORK_CHECK_INTERVAL_SERVER = 120 * 1000;
 let LAST_GLOBAL_NETWORK_CHECK_TIME = 0.0;
-// Centralizado: {pilot_id: {'websocket': ws, 'vatsim_id': id, 'ivao_id': id, 'tx_sent': bool}}
+// Centralizado: {pilot_id: {'websocket': ws, 'vatsim_id': id, 'ivao_id': id, 'tx_sent': bool, 'last_stop_time': Date}}
 const PILOT_CONNECTIONS = {};
 
 
@@ -53,7 +55,6 @@ const getTimestamp = () => new Date().toLocaleTimeString('pt-BR', { hour: '2-dig
  */
 function register(ws) {
     USERS.add(ws);
-    // Atribui propriedades customizadas ao objeto WebSocket (como no Python)
     ws.pilot_id = "ANON";
     ws.vatsim_id = "N/A";
     ws.ivao_id = "N/A";
@@ -67,10 +68,8 @@ function register(ws) {
 async function unregister(ws) {
     if (!USERS.has(ws)) return;
 
-    // Tenta obter o ID do objeto websocket
     const pilot_id = ws.pilot_id || "ANON";
 
-    // Remove o piloto dos snapshots e conexões controladas
     if (pilot_id !== "ANON") {
         if (ALL_PILOT_SNAPSHOTS[pilot_id]) {
             delete ALL_PILOT_SNAPSHOTS[pilot_id];
@@ -82,10 +81,8 @@ async function unregister(ws) {
 
     USERS.delete(ws);
 
-    // CHAVE: Forçar a atualização dos arquivos de monitoramento após a desconexão
     let data_to_update = { alt_ind: 0, vs: 0, ias: 0, eng_combustion: 0, vatsim_id: "N/A", ivao_id: "N/A", pilot_id: "N/A", packets_sent: 0, mb_sent: 0.0 };
     if (Object.keys(ALL_PILOT_SNAPSHOTS).length > 0) {
-        // Pega um snapshot válido para forçar a atualização da lista de pilotos
         data_to_update = Object.values(ALL_PILOT_SNAPSHOTS)[0];
     }
 
@@ -105,7 +102,7 @@ function printEvent(pilot_id, event_name, description) {
 }
 
 /**
- * Formata um número para string com separador de milhares (ponto como milhar, vírgula como decimal - Padrão Brasileiro)
+ * Formata um número para string com separador de milhares 
  * @param {number} value
  * @param {number} decimals
  * @returns {string}
@@ -114,17 +111,11 @@ function formatNumber(value, decimals) {
     if (typeof value !== 'number') return "N/A";
 
     const options = { minimumFractionDigits: decimals, maximumFractionDigits: decimals };
-    // Usamos o locale 'pt-BR' para garantir o formato correto (1.000,00)
     return value.toLocaleString('pt-BR', options);
 }
 
 // --- Lógica de Verificação de Status Online na IVAO/VATSIM ---
 
-/**
- * Verifica se o piloto (pelo IVAO ID) está ativo na rede IVAO.
- * @param {string} ivao_id
- * @returns {Promise<boolean>}
- */
 async function isPilotOnlineIVAO(ivao_id) {
     if (!ivao_id || ivao_id.trim() === 'N/A' || ivao_id.trim() === '' || ivao_id.trim() === '0') return false;
     const ivao_id_int = parseInt(ivao_id.trim());
@@ -133,24 +124,19 @@ async function isPilotOnlineIVAO(ivao_id) {
     try {
         const response = await axios.get(IVAO_DATA_URL, { timeout: 5000 });
         const data = response.data;
-
         for (const client of data.clients.pilots) {
             if (client.userId === ivao_id_int) {
+                console.log(`[${getTimestamp()}] [IVAO CHECK] Piloto ${ivao_id} encontrado ONLINE.`);
                 return true;
             }
         }
         return false;
     } catch (e) {
-        // console.log(`[${getTimestamp()}] [SERVER CHECK] ERRO ao verificar IVAO: ${e.message}`);
+        console.error(`[${getTimestamp()}] [IVAO CHECK] ERRO CRÍTICO para ID ${ivao_id} (Pode ser Firewall/Conexão): ${e.message}`);
         return false;
     }
 }
 
-/**
- * Verifica se o piloto (pelo VATSIM ID) está ativo na rede VATSIM.
- * @param {string} vatsim_id
- * @returns {Promise<boolean>}
- */
 async function isPilotOnlineVATSIM(vatsim_id) {
     if (!vatsim_id || vatsim_id.trim() === 'N/A' || vatsim_id.trim() === '' || vatsim_id.trim() === '0') return false;
     const vatsim_id_int = parseInt(vatsim_id.trim());
@@ -159,29 +145,16 @@ async function isPilotOnlineVATSIM(vatsim_id) {
     try {
         const response = await axios.get(VATSIM_DATA_URL, { timeout: 5000 });
         const data = response.data;
-
         for (const pilot of data.pilots) {
-            if (pilot.cid === vatsim_id_int) {
-                return true;
-            }
+            if (pilot.cid === vatsim_id_int) { return true; }
         }
         return false;
-    } catch (e) {
-        // console.log(`[${getTimestamp()}] [SERVER CHECK] ERRO ao verificar VATSIM: ${e.message}`);
-        return false;
-    }
+    } catch (e) { return false; }
 }
 
-/**
- * Verifica se o piloto está ativo em pelo menos uma das redes (IVAO ou VATSIM).
- * @param {string} vatsim_id
- * @param {string} ivao_id
- * @returns {Promise<boolean>}
- */
 async function checkNetworkStatus(vatsim_id, ivao_id) {
     const isVatsimOnline = await isPilotOnlineVATSIM(vatsim_id);
     const isIvaoOnline = await isPilotOnlineIVAO(ivao_id);
-
     return isVatsimOnline || isIvaoOnline;
 }
 // --- FIM Lógica de Verificação de Status Online ---
@@ -191,18 +164,16 @@ async function checkNetworkStatus(vatsim_id, ivao_id) {
 async function networkStatusCheckerLoop() {
 
     const loop = async () => {
-        const currentTime = Date.now(); // Tempo em milissegundos
+        const currentTime = Date.now();
 
-        // 1. GATE PRINCIPAL: Verifica se há pilotos conectados
         if (Object.keys(PILOT_CONNECTIONS).length === 0) {
-            LAST_GLOBAL_NETWORK_CHECK_TIME = currentTime; // Reset/Update para evitar estouro
-            setTimeout(loop, 1000); // Tenta novamente em 1 segundo
+            LAST_GLOBAL_NETWORK_CHECK_TIME = currentTime;
+            setTimeout(loop, 1000);
             return;
         }
 
-        // 2. GATE DE TEMPO: Verifica se 120 segundos se passaram desde o último check global
         if (currentTime - LAST_GLOBAL_NETWORK_CHECK_TIME < NETWORK_CHECK_INTERVAL_SERVER) {
-            setTimeout(loop, 1000); // Tenta novamente em 1 segundo
+            setTimeout(loop, 1000);
             return;
         }
 
@@ -210,19 +181,17 @@ async function networkStatusCheckerLoop() {
         LAST_GLOBAL_NETWORK_CHECK_TIME = currentTime;
 
         const pilotsToRemove = [];
-        // Cria uma cópia das chaves para iterar, permitindo modificação do objeto
         const pilotIds = Object.keys(PILOT_CONNECTIONS);
 
         for (const pilotId of pilotIds) {
             const connData = PILOT_CONNECTIONS[pilotId];
-            if (!connData) continue; // Caso tenha sido removido por outra rotina
+            if (!connData) continue;
 
             const ws = connData.websocket;
             const vatsimId = connData.vatsim_id;
             const ivaoId = connData.ivao_id;
 
-            // Pula pilotos sem IDs válidos
-            if (pilotId === "ANON" || (vatsimId === "N/A" && ivaoId === "N/A")) {
+            if (pilotId === "ANON" || (vatsimId === "N/A" && ivaoId === "N/A") || !ALL_PILOT_SNAPSHOTS[pilotId]) {
                 continue;
             }
 
@@ -231,46 +200,73 @@ async function networkStatusCheckerLoop() {
                 const isTransmitting = connData.tx_sent;
 
                 if (ws.readyState !== ws.OPEN) {
-                    pilotsToRemove.push(pilotId); // Conexão fechada
+                    pilotsToRemove.push(pilotId);
                     continue;
                 }
 
+                // --- LÓGICA DE PAUSA INTELIGENTE ---
+                const pilotSnapshot = ALL_PILOT_SNAPSHOTS[pilotId];
+                const currentIas = pilotSnapshot.ias || 0;
+                const currentOnGround = pilotSnapshot.on_ground || 1;
+
+                const isStuckOnGround = currentOnGround === 1 && currentIas < 5 && isOnline;
+
+                if (isStuckOnGround && isTransmitting) {
+                    const lastStopTime = connData.last_stop_time;
+                    if (!lastStopTime) {
+                        connData.last_stop_time = new Date();
+                        continue;
+                    }
+
+                    const timeStuckMs = new Date().getTime() - lastStopTime.getTime();
+                    if (timeStuckMs >= 5 * 60 * 1000) {
+                        const command = JSON.stringify({ command: "STOP_TX" });
+                        await ws.send(command);
+                        connData.tx_sent = false;
+                        connData.last_stop_time = new Date();
+                        printEvent(pilotId, "PAUSA_INTELIGENTE", "Pouso/Solo detectado (5min). Transmissão pausada para economia de dados.");
+                        continue;
+                    }
+                }
+                else if (connData.last_stop_time && (currentIas > 5 || currentOnGround === 0)) {
+                    connData.last_stop_time = null;
+                }
+
+                // --- LÓGICA DE REDE PADRÃO ---
                 if (isOnline) {
-                    // PILOTO ONLINE: Se não estava transmitindo, envia START_TX
                     if (!isTransmitting) {
-                        const command = JSON.stringify({ command: "START_TX" });
-                        await ws.send(command); // Usamos await por consistência
-                        connData.tx_sent = true;
-                        console.log(`[${getTimestamp()}] [SERVER CHECK] Piloto ${pilotId} ONLINE. Comando START_TX enviado.`);
+                        if (currentIas > 5 || currentOnGround === 0) {
+                            const command = JSON.stringify({ command: "START_TX" });
+                            await ws.send(command);
+                            connData.tx_sent = true;
+                            console.log(`[${getTimestamp()}] [SERVER CHECK] Piloto ${pilotId} ONLINE. Comando START_TX enviado.`);
+                        }
                     }
                 } else {
-                    // PILOTO OFFLINE: Se estava transmitindo, envia STOP_TX e atualiza a flag.
                     if (isTransmitting) {
                         const command = JSON.stringify({ command: "STOP_TX" });
                         await ws.send(command);
                         connData.tx_sent = false;
+                        connData.last_stop_time = new Date();
                         console.log(`[${getTimestamp()}] [SERVER CHECK] Piloto ${pilotId} OFFLINE em IVAO/VATSIM. Comando STOP_TX enviado (Conexão mantida).`);
                     }
                 }
 
             } catch (e) {
-                // Se o send falhar (e.g., conexão fechada no meio do send)
                 console.log(`[${getTimestamp()}] [SERVER CHECK] Erro processando/enviando comando para ${pilotId}: ${e.message}`);
                 pilotsToRemove.push(pilotId);
             }
         }
 
-        // Limpa os pilotos desconectados/fechados
         for (const pilotId of pilotsToRemove) {
             if (PILOT_CONNECTIONS[pilotId]) {
                 delete PILOT_CONNECTIONS[pilotId];
             }
         }
 
-        setTimeout(loop, 1000); // Tenta novamente em 1 segundo
+        setTimeout(loop, 1000);
     };
 
-    // Inicia o loop
     setTimeout(loop, 1000);
 }
 
@@ -294,68 +290,70 @@ function generateEstimatedDataTable(average_rate_mbh) {
 }
 
 /**
- * Gera as linhas HTML para a tabela resumo de todos os pilotos ativos.
+ * ATUALIZADO: Itera sobre PILOT_CONNECTIONS para mostrar TODOS os usuários logados.
  * @returns {string}
  */
 function generatePilotSummaryRows() {
     let rows_html = "";
 
-    const pilotSnapshots = ALL_PILOT_SNAPSHOTS;
-    const pilotIds = Object.keys(pilotSnapshots);
+    const pilotIds = Object.keys(PILOT_CONNECTIONS);
 
     if (pilotIds.length === 0) {
-        return '<tr><td colspan="6" style="text-align:center; color: #95a5a6;">Nenhum voo ativo no momento.</td></tr>';
+        return '<tr><td colspan="6" style="text-align:center; color: #A9A9A9;">Nenhum cliente conectado no momento.</td></tr>';
     }
 
     for (const pilot_id of pilotIds) {
-        const data = pilotSnapshots[pilot_id];
-        // Verifica o status de transmissão para fins de exibição no HTML
-        const conn_status = PILOT_CONNECTIONS[pilot_id] ? PILOT_CONNECTIONS[pilot_id].tx_sent : false;
+        const connData = PILOT_CONNECTIONS[pilot_id];
+        const data = ALL_PILOT_SNAPSHOTS[pilot_id];
+        const conn_status = connData ? connData.tx_sent : false;
 
-        // Dados essenciais para o resumo
-        const alt = formatNumber(data.alt_ind || 0, 0);
-        const vs = formatNumber(data.vs || 0, 0);
-        const ias = formatNumber(data.ias || 0, 0);
-        const vatsim = data.vatsim_id || 'N/A';
+        // Dados de voo (usando N/A se não houver snapshot)
+        const alt = data ? formatNumber(data.alt_ind || 0, 0) : "N/A";
+        const vs = data ? formatNumber(data.vs || 0, 0) : "N/A";
+        const ias = data ? formatNumber(data.ias || 0, 0) : "N/A";
+
+        // Dados de conexão (sempre disponíveis)
+        const vatsim = connData.vatsim_id || 'N/A';
+        const ivao = connData.ivao_id || 'N/A';
+
 
         // Lógica de Status Visual
         let status_text;
         let status_class;
 
-        if (!conn_status) {
-            status_text = "PAUSADO (Offline Rede)";
-            status_class = "status-cold";
+        if (!data) {
+            status_text = "CONECTADO (Sem Dados)";
+            status_class = "status-pending";
+        }
+        else if (!conn_status) {
+            const is_stuck_on_ground = connData.last_stop_time;
+
+            if (is_stuck_on_ground && (data.eng_combustion || 0) === 1 && (data.on_ground || 1) === 1) {
+                status_text = "PAUSADO (Solo Inteligente)";
+            } else {
+                status_text = "PAUSADO (Offline Rede)";
+            }
+            status_class = "status-paused";
         } else {
-            // VARIÁVEIS DE VERIFICAÇÃO
-            const current_vs = data.vs || 0;
-            const is_moving_vertically = Math.abs(current_vs) > 50; // Movimento vertical > 50 fpm
-            const is_airborne = (data.on_ground || 1) === 0 && (data.agl || 0) > 100;
+            // Lógica de voo ativo (só entra aqui se conn_status é True)
+
+            // CORREÇÃO AQUI: Baixar o AGL de 100 para 50 para detectar voo mais cedo
+            const is_airborne = (data.on_ground || 1) === 0 || (data.agl || 0) > 50;
+
             const is_taxiing = (data.on_ground || 1) === 1 && (data.ias || 0) > 5 && (data.eng_combustion || 0) === 1;
             const is_cold = (data.eng_combustion || 0) === 0;
 
-            // NOVO: Prioriza Movimento Vertical ou On_Ground correto
-            if (is_airborne || (is_moving_vertically && (data.ias || 0) > 40)) {
-                status_text = "EM VOO";
-                status_class = "status-airborne";
-            }
-            else if (is_taxiing) {
-                status_text = "TAXIANDO";
-                status_class = "status-taxiing";
-            }
-            else if (!is_cold) {
-                status_text = "EM SOLO (Engine On)";
-                status_class = "status-ready";
-            }
-            else {
-                status_text = "OFFLINE/COLD";
-                status_class = "status-cold";
-            }
+            if (is_airborne) { status_text = "EM VOO"; status_class = "status-airborne"; }
+            else if (is_taxiing) { status_text = "TAXIANDO"; status_class = "status-taxiing"; }
+            else if (!is_cold) { status_text = "EM SOLO (Engine On)"; status_class = "status-ready"; }
+            else { status_text = "OFFLINE/COLD"; status_class = "status-cold"; }
         }
+
 
         rows_html += `
                 <tr class="pilot-row ${status_class}">
                     <td class="pilot-id">${pilot_id}</td>
-                    <td>V: ${vatsim} / I: ${data.ivao_id || 'N/A'}</td>
+                    <td>V: ${vatsim} / I: ${ivao}</td>
                     <td>${status_text}</td>
                     <td>${alt} ft</td>
                     <td>${vs} fpm</td>
@@ -378,17 +376,15 @@ async function generateRealtimeDataJson(data, received_count, total_bytes_receiv
     const now = new Date();
     const timeSinceLastUpdate = now.getTime() - LAST_JSON_UPDATE_TIME.getTime();
 
-    // MODIFICAÇÃO: Verifica se já se passaram 60 segundos (60000 ms) desde a última atualização
     if (timeSinceLastUpdate < 60000) {
-        return; // Não atualiza o arquivo JSON
+        return;
     }
 
-    // Atualiza o timestamp da última escrita
     LAST_JSON_UPDATE_TIME = now;
     console.log(`[${getTimestamp()}] [JSON_WRITE] Atualizando whazzup.json para Lat/Lng.`);
 
     const timeElapsed = now.getTime() - SERVER_START_TIME.getTime();
-    const timeElapsedHours = timeElapsed / (1000 * 3600); // Milissegundos para horas
+    const timeElapsedHours = timeElapsed / (1000 * 3600);
 
     let averageRateMbh = 0.0;
     const totalMbReceived = total_bytes_received / (1024 * 1024);
@@ -397,6 +393,7 @@ async function generateRealtimeDataJson(data, received_count, total_bytes_receiv
         averageRateMbh = totalMbReceived / timeElapsedHours;
     }
 
+    // Mantido o formato original do JSON para o mapa (single marker)
     const json_data = {
         "timestamp": now.toISOString(),
         "pilot_id": data.pilot_id || "N/A",
@@ -417,7 +414,6 @@ async function generateRealtimeDataJson(data, received_count, total_bytes_receiv
         await fs.mkdir(path.dirname(JSON_FILE_PATH), { recursive: true });
         await fs.writeFile(JSON_FILE_PATH, JSON.stringify(json_data));
     } catch (e) {
-        // ESSA MENSAGEM É CRUCIAL PARA DEBUGAR O PROBLEMA DE ESCRITA
         console.error(`[${getTimestamp()}] ERRO AO ESCREVER ARQUIVO JSON: ${e.message}`);
     }
 }
@@ -435,11 +431,11 @@ async function updateMonitorFiles(data, received_count, total_bytes_received) {
     // 1. GERAÇÃO DO JSON (Controlada pelo tempo dentro da função)
     await generateRealtimeDataJson(data, received_count, total_bytes_received);
 
-    // 2. GERAÇÃO DO HTML (Sempre atualiza, mas a tabela de resumo de pilotos depende do ALL_PILOT_SNAPSHOTS)
+    // 2. GERAÇÃO DO HTML (Com novo estilo e lógica de resumo)
 
     const now = new Date();
     const timeElapsed = now.getTime() - SERVER_START_TIME.getTime();
-    const timeElapsedHours = timeElapsed / (1000 * 3600); // Milissegundos para horas
+    const timeElapsedHours = timeElapsed / (1000 * 3600);
 
     let averageRateMbh = 0.0;
     const totalMbReceived = total_bytes_received / (1024 * 1024);
@@ -456,7 +452,7 @@ async function updateMonitorFiles(data, received_count, total_bytes_received) {
     const sentCount = formatNumber(data.packets_sent || 0, 0);
     const sentMb = formatNumber(data.mb_sent || 0.0, 4);
     const receivedMb = formatNumber(totalMbReceived, 4);
-    const activePilotsCount = Object.keys(ALL_PILOT_SNAPSHOTS).length;
+    const activePilotsCount = Object.keys(PILOT_CONNECTIONS).length;
 
     const html_content = `<?php
 // Arquivo gerado em ${now.toISOString()} pelo Servidor Node.js
@@ -472,24 +468,32 @@ async function updateMonitorFiles(data, received_count, total_bytes_received) {
     <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
     
     <style>
-        /* Base e Fundo */
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #1c1c1c; color: #e0e0e0; margin: 0; padding: 20px; }
-        .container { max-width: 900px; margin: 0 auto; background-color: #242424; padding: 30px; border-radius: 12px; box-shadow: 0 8px 20px rgba(0, 0, 0, 0.5); }
+        /* Base e Fundo (Tema Escuro Moderno) */
+        body { font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #121212; color: #E0E0E0; margin: 0; padding: 20px; }
+        .container { max-width: 1000px; margin: 0 auto; background-color: #1E1E1E; padding: 30px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.7); }
         
         /* Títulos */
-        h1 { text-align: center; color: #00bcd4; border-bottom: 2px solid #00bcd4; padding-bottom: 10px; margin-bottom: 25px; font-weight: 300; letter-spacing: 1px; }
-        h2 { color: #ff9800; font-size: 1.2em; border-bottom: 1px solid #ff980040; padding-bottom: 5px; margin-top: 30px; }
+        h1 { text-align: center; color: #00ADB5; border-bottom: 2px solid #00ADB5; padding-bottom: 10px; margin-bottom: 25px; font-weight: 500; letter-spacing: 1px; }
+        h2 { color: #FFD700; font-size: 1.4em; border-bottom: 1px solid #FFD70040; padding-bottom: 5px; margin-top: 30px; }
 
         /* Tabelas */
         .data-table { width: 100%; border-collapse: collapse; margin-bottom: 30px; border-radius: 8px; overflow: hidden; }
-        .data-table th, .data-table td { padding: 14px; text-align: left; border-bottom: 1px solid #333; }
-        .data-table th { background-color: #383838; color: #ffffff; font-weight: 600; text-transform: uppercase; }
-        #map { height: 400px; width: 100%; border-radius: 8px; margin-top: 20px; }
+        .data-table th, .data-table td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #333333; }
+        .data-table th { background-color: #2D2D2D; color: #FFFFFF; font-weight: 600; text-transform: uppercase; font-size: 0.9em; }
+        .data-table tr:hover { background-color: #282828; }
+        #map { height: 450px; width: 100%; border-radius: 8px; margin-top: 20px; box-shadow: 0 4px 10px rgba(0, 0, 0, 0.5); }
+        
         /* Cores Dinâmicas */
-        .pilot-row.status-airborne { background-color: #43a04730; color: #81c784; } 
-        .pilot-row.status-taxiing { background-color: #ffb30030; color: #ffb300; } 
-        .pilot-row.status-ready { background-color: #1e88e530; color: #64b5f6; } 
-        .pilot-row.status-cold { background-color: #333333; color: #999; } 
+        .pilot-row.status-airborne { background-color: #388E3C30; color: #81C784; font-weight: bold; } 
+        .pilot-row.status-taxiing { background-color: #FFB30030; color: #FFD54F; } 
+        .pilot-row.status-ready { background-color: #1976D230; color: #64B5F6; } 
+        .pilot-row.status-cold { background-color: #3A3A3A; color: #A9A9A9; } 
+        .pilot-row.status-paused { background-color: #C6282830; color: #EF9A9A; } /* Pausado (Offline/Solo Inteligente) */
+        .pilot-row.status-pending { background-color: #FF8A6530; color: #FFCC80; } /* Conectado, Aguardando Dados */
+
+        /* Estatísticas */
+        .stats-label { font-weight: 400; }
+        .stats-value { font-weight: 600; color: #00ADB5; }
     </style>
 </head>
 <body>
@@ -498,13 +502,13 @@ async function updateMonitorFiles(data, received_count, total_bytes_received) {
         
         <div id="status" class="status-box status-connected">ESTADO DO SERVIDOR: ${now.toLocaleTimeString('pt-BR')}</div>
 
-        <h2>Resumo de Voos Ativos (${activePilotsCount} Piloto(s))</h2>
+        <h2>Resumo de Clientes Conectados (${activePilotsCount} Clientes)</h2>
         <table class="data-table">
             <thead>
                 <tr>
                     <th>ID Piloto</th>
                     <th>VATSIM / IVAO</th>
-                    <th>Status Voo</th>
+                    <th>Status</th>
                     <th>Altitude</th>
                     <th>VS</th>
                     <th>IAS</th>
@@ -520,7 +524,7 @@ async function updateMonitorFiles(data, received_count, total_bytes_received) {
         
         <script>
             var map;
-            var marker = null; // CHAVE: Inicializado como null para controle de criação
+            var marker = null; 
             
             const JSON_URL = 'whazzup.json';
 
@@ -532,7 +536,7 @@ async function updateMonitorFiles(data, received_count, total_bytes_received) {
                        typeof data.lng === 'number' && data.lng !== 0.0;
             }
 
-            // NOVO: Apenas cria o mapa, centralizado no fallback de SP
+            // Apenas cria o mapa, centralizado no fallback de SP
             function initMap() { 
                 if (!document.getElementById('map')) return; 
 
@@ -550,8 +554,9 @@ async function updateMonitorFiles(data, received_count, total_bytes_received) {
 
                 var baseLayers = { "Estrada (OSM)": osm, "Satélite (Esri)": satellite };
                 L.control.layers(baseLayers).addTo(map);
-
-                // O marcador NÃO é criado aqui
+                
+                // *** CORREÇÃO: Garante que o mapa aparece mesmo com o novo CSS/Layout ***
+                map.invalidateSize();
             }
 
 
@@ -571,7 +576,7 @@ async function updateMonitorFiles(data, received_count, total_bytes_received) {
                         // CRIAÇÃO INICIAL DO MARCADOR (Apenas se não existir)
                         if (!marker) {
                             marker = L.marker(newLatLng).addTo(map)
-                                .bindPopup(\`<b>Piloto: \${data.pilot_id}</b><br>Alt: \${data.alt_ind} ft<br>IAS: \${data.ias} kts\`)
+                                .bindPopup('<b>Piloto: ' + data.pilot_id + '</b><br>Alt: ' + data.alt_ind + ' ft<br>IAS: ' + data.ias + ' kts')
                                 .openPopup();
                             
                             // Centraliza o mapa no local correto
@@ -606,8 +611,8 @@ async function updateMonitorFiles(data, received_count, total_bytes_received) {
                         if (marker) {
                             // Se o marcador existe, apenas move
                             marker.setLatLng(newLatLng);
-                            // Atualiza o popup
-                            marker.getPopup().setContent(\`<b>Piloto: \${data.pilot_id}</b><br>Alt: \${data.alt_ind} ft<br>IAS: \${data.ias} kts\`);
+                            // Atualiza o popup (usando concatenação segura)
+                            marker.getPopup().setContent('<b>Piloto: ' + data.pilot_id + '</b><br>Alt: ' + data.alt_ind + ' ft<br>IAS: ' + data.ias + ' kts');
                             
                             // Re-centraliza se o marcador sair da tela
                             if (!map.getBounds().contains(newLatLng)) {
@@ -617,7 +622,7 @@ async function updateMonitorFiles(data, received_count, total_bytes_received) {
                         } else {
                             // Se o marcador NÃO existe, cria ele agora (catch up)
                             marker = L.marker(newLatLng).addTo(map)
-                                .bindPopup(\`<b>Piloto: \${data.pilot_id}</b><br>Alt: \${data.alt_ind} ft<br>IAS: \${data.ias} kts\`)
+                                .bindPopup('<b>Piloto: ' + data.pilot_id + '</b><br>Alt: ' + data.alt_ind + ' ft<br>IAS: ' + data.ias + ' kts')
                                 .openPopup();
                             
                             // Centraliza o mapa no local correto
@@ -714,32 +719,42 @@ async function handleFlightData(ws) {
                     websocket: ws,
                     vatsim_id: vatsimId,
                     ivao_id: ivaoId,
-                    tx_sent: false // Flag para garantir um único envio de START_TX
+                    tx_sent: false,
+                    last_stop_time: null,
                 };
 
                 // Realiza o CHECK IMEDIATO
                 const isOnline = await checkNetworkStatus(vatsimId, ivaoId);
 
+                // MODIFICAÇÃO: Se o piloto é VÁLIDO (tem IDs) e está ONLINE, envia START_TX
+                // A regra de IAS/OnGround será aplicada pelo loop de Pausa Inteligente 5 minutos depois.
                 if (isOnline) {
                     const command = JSON.stringify({ command: "START_TX" });
                     ws.send(command);
                     PILOT_CONNECTIONS[pilotId].tx_sent = true;
-                    console.log(`[${getTimestamp()}] [SERVER CHECK] Piloto ${pilotId} ONLINE (Check Imediato). Comando START_TX enviado (ÚNICO).`);
+                    console.log(`[${getTimestamp()}] [SERVER CHECK] Piloto ${pilotId} ONLINE e detectado. Comando START_TX enviado (Inicia Transmissão).`);
                 } else {
                     const command = JSON.stringify({ command: "STOP_TX" });
                     ws.send(command);
                     PILOT_CONNECTIONS[pilotId].tx_sent = false;
-                    console.log(`[${getTimestamp()}] [SERVER CHECK] Piloto ${pilotId} OFFLINE (Check Imediato). Comando STOP_TX enviado (Conexão mantida).`);
+                    console.log(`[${getTimestamp()}] [SERVER CHECK] Piloto ${pilotId} OFFLINE na rede. Comando STOP_TX enviado (Conexão mantida).`);
                 }
+            }
+
+            // --- Armazena o snapshot mesmo se a transmissão estiver pausada ---
+            if (pilotId in PILOT_CONNECTIONS) {
+                ALL_PILOT_SNAPSHOTS[pilotId] = data;
             }
 
             // CHAVE: Só processa a lógica de eventos e a escrita dos arquivos se estivermos transmitindo
             if (!PILOT_CONNECTIONS[pilotId] || !PILOT_CONNECTIONS[pilotId].tx_sent) {
+                // Atualiza a página de monitoramento mesmo sem transmitir dados de voo
+                await updateMonitorFiles(data, packetsReceivedCount, totalBytesReceived);
                 return;
             }
 
 
-            // LOG CONCISO DE DEBUG
+            // LOG CONCISO DE DEBUG (REATIIVADO)
             const altitude = data.alt_ind || 0;
             const ias = data.ias || 0;
             const vs = data.vs || 0;

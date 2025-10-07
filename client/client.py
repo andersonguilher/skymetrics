@@ -19,10 +19,10 @@ import websocket
 import threading
 from datetime import datetime
 
-# NOVO: Módulos para atualização
+# NOVO: Módulos para atualização e alertas
 from subprocess import Popen 
 from threading import Lock 
-from tkinter import messagebox # Usar messagebox do tkinter
+from tkinter import messagebox 
 
 # =================================================================
 # 1. CONSTANTES E CONFIGURAÇÃO
@@ -33,7 +33,6 @@ CLIENT_LOGIN_SECTION = 'LOGIN_CREDENTIALS'
 
 # NOVO: VERSÃO ATUAL E LÓGICA DE ATUALIZAÇÃO
 CURRENT_VERSION = "1.0.0" 
-# CORREÇÃO DA URL SOLICITADA PELO USUÁRIO
 UPDATE_CHECK_URL = "https://kafly.com.br/skymetrics/update/current_version.txt"
 UPDATE_EXECUTABLE_NAME = "updater.exe" 
 UPDATE_CHECK_LOCK = Lock()
@@ -73,7 +72,7 @@ DATA_PRECISION = {
 }
 
 # =================================================================
-# 2. FUNÇÕES DE LÓGICA DE ATUALIZAÇÃO (Adaptadas do main.py)
+# 2. FUNÇÕES DE LÓGICA DE ATUALIZAÇÃO
 # =================================================================
 
 def _compare_versions(current_v, latest_v):
@@ -99,8 +98,7 @@ def _compare_versions(current_v, latest_v):
         return False
 
 def initiate_update_and_exit(app_instance, latest_version):
-    """Inicia o updater.exe e fecha o aplicativo principal. 
-    Garanti que esta função só é chamada na thread da GUI."""
+    """Inicia o updater.exe e fecha o aplicativo principal."""
     
     if app_instance._update_in_progress:
         return
@@ -137,7 +135,6 @@ def check_for_update(app_instance, silent=False):
     
     with UPDATE_CHECK_LOCK:
         try:
-            # Garante que a aplicação ainda está ativa e não está atualizando
             if not app_instance.winfo_exists() or app_instance._update_in_progress:
                 return False 
                 
@@ -151,11 +148,8 @@ def check_for_update(app_instance, silent=False):
             
             if _compare_versions(CURRENT_VERSION, latest_version):
                 if not silent:
-                    # Apenas loga a descoberta, a função initiate_update_and_exit fará o diálogo e encerramento.
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] [ALERTA] Nova versão {latest_version} disponível (atual: {CURRENT_VERSION}). Iniciando diálogo...")
                 
-                # CHAVE DA CORREÇÃO: Chama initiate_update_and_exit APENAS na thread da GUI
-                # A flag `_update_in_progress` impede chamadas repetidas enquanto o diálogo está aberto.
                 app_instance.after(0, initiate_update_and_exit, app_instance, latest_version)
                 
                 return True
@@ -176,7 +170,6 @@ def check_for_update(app_instance, silent=False):
 # =================================================================
 # 3. LÓGICA DE AUTENTICAÇÃO, ID e CREDENCIAIS
 # =================================================================
-# ... (Funções de login e credenciais permanecem inalteradas)
 def generate_pilot_numeric_id(email: str) -> int:
     email_bytes = email.lower().encode('utf-8')
     return zlib.crc32(email_bytes) & 0xFFFFFFFF 
@@ -228,7 +221,6 @@ def save_credentials(email: str, password: str):
 def delete_credentials(email: str, clear_email: bool = True):
     """
     Remove as credenciais e desativa o autologin.
-    Se 'clear_email' for False (usado no Logoff), o e-mail é mantido no arquivo.
     """
     try:
         keyring_username = email
@@ -246,7 +238,7 @@ def delete_credentials(email: str, clear_email: bool = True):
 
 
 # =================================================================
-# 4. CLASSES DO CLIENTE WEBSOCKET E GUI
+# 4. SIMCONNECT, MOCK E LÓGICA DE DADOS
 # =================================================================
 
 # --- MOCKUP / SIMCONNECT SETUP ---
@@ -265,12 +257,12 @@ class MockAircraftRequests:
         if var == "AIRSPEED_INDICATED": return 215 + 65 * random.uniform(-0.05, 0.05)
         if var == "AIRSPEED_TRUE": return self.get("AIRSPEED_INDICATED") * 1.1 + 10 
         if var == "ALTITUDE ABOVE GROUND": return 500 if cycle_60s < 5 or cycle_60s > 50 else 10000
-        if var == "SIM_ON_GROUND": return 1 if self.get("ALTITUDE ABOVE GROUND") < 10 else 0
+        if var == "SIM_ON_GROUND": return 1 if self.get("ALTITUDE_ABOVE_GROUND") < 10 else 0
         if var == "GEAR_HANDLE_POSITION": return 1.0 if cycle_60s < 10 else 0.0
         if var == "NUMBER_OF_ENGINES": return 2
         if var == "PLANE_BANK_DEGREES": return 45 if 2 < cycle_60s < 4 else 5 
         if var == "G_FORCE": return 1.0 + 0.8 * abs(0.5 - (cycle_60s / 60))
-        if var == "FUEL_TOTAL_QUANTITY": return 8500.5 + 500 * random.uniform(-0.01, 0.01)
+        if var == "FUEL_TOTAL_QUANTITY": return 8500.5 + 500 * random.uniform(-0.01, -0.01)
         if var == "GENERAL_ENG_COMBUSTION:1": return 1 if t > 5 else 0
         if var == "LIGHT_BEACON_ON": return 1 if t > 5 else 0
         if var == "LIGHT_LANDING_ON": return 1 if t < 60 else 0 
@@ -299,15 +291,21 @@ flight_data = {
     "lat": 0.0, "lng": 0.0, "eng_combustion": 0, "light_beacon_on": 0, "light_landing_on": 0, "light_strobe_on": 0, "plane_bank_degrees": 0.0, 
     "engine_vibration_1": 0.0,
     "pilot_id": "", "vatsim_id": "", "ivao_id": "", 
-    "alerts": {"overspeed_warning": 0, "stall_warning": 0, "beacon_off_engine_on": 0, "engine_fire": 0, "stall_protection_active": 0, "gpws_warning": 0, "flaps_speed_exceeded": 0, "gear_warning_system_active": 0,}
+    "alerts": {"overspeed_warning": 0, "stall_warning": 0, "beacon_off_engine_on": 0, "engine_fire": 0, "stall_protection_active": 0, "gpws_warning": 0, "flaps_speed_exceeded": 0, "gear_warning_system_active": 0,},
+    "client_disconnect": 0, 
 }
 
+# CHAVE DA CORREÇÃO: Força o erro a ser levantado se SimConnect falhar
 def get_safe_value(var_name, default=0):
     try:
         if aq is None: return default 
         value = aq.get(var_name)
         return value if value is not None else default
-    except Exception: return default
+    except Exception as e: 
+        # Se a conexão for REAL, re-eleva a exceção para o _send_data_loop tratar como perda de SimConnect
+        if CONN_STATUS == "REAL":
+            raise e
+        return default
 
 def fetch_all_data():
     """Busca dados COMPLETOS e atualiza o dicionário global."""
@@ -336,7 +334,6 @@ def fetch_all_data():
     alerts["overspeed_warning"] = get_safe_value("OVERSPEED_WARNING"); alerts["stall_warning"] = get_safe_value("STALL_WARNING"); alerts["stall_protection_active"] = get_safe_value("STALL_PROTECTION_ACTIVE")
     alerts["gpws_warning"] = get_safe_value("GPWS_WARNING"); alerts["flaps_speed_exceeded"] = get_safe_value("FLAPS_SPEED_EXCEEDED"); alerts["gear_warning_system_active"] = get_safe_value("GEAR_WARNING_SYSTEM_ACTIVE")
     alerts["engine_fire"] = get_safe_value("GENERAL_ENG_FIRE:1")
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] [CLIENT DEBUG] AGL: {flight_data['agl']:.1f} ft, ON_GROUND: {flight_data['on_ground']:.0f}, ALT: {flight_data['alt_ind']:.0f} ft")
     if flight_data["eng_combustion"] == 1 and flight_data["light_beacon_on"] == 0: alerts["beacon_off_engine_on"] = 1
     else: alerts["beacon_off_engine_on"] = 0
 
@@ -356,35 +353,35 @@ def has_significant_change(current_data, last_data):
     return current_data != last_data
 
 # =================================================================
-# 5. CLASSE MONITOR E GUI
+# 5. CLASSES DO CLIENTE WEBSOCKET E GUI
 # =================================================================
 
 class FlightMonitor:
-    def __init__(self, pilot_email: str, numeric_id: int, pilot_data: dict):
+    def __init__(self, pilot_email: str, numeric_id: int, pilot_data: dict, master_app: 'MainApplication'):
         self.pilot_email = pilot_email; self.numeric_id = numeric_id
         self.vatsim_id = pilot_data.get('vatsim_id', 'N/A'); self.ivao_id = pilot_data.get('ivao_id', 'N/A')
         self.running = True; self.ws_client = None; self.last_sent_data = None; self.packets_sent_count = 0; self.total_bytes_sent = 0.0
         self.last_send_time = time.time() 
-        # NOVO: Flag para controlar a transmissão, controlada pelo servidor
+        self.master_app = master_app
         self.transmitting = False 
 
     def start_monitor(self):
         """Inicia a thread de gerenciamento de conexão e reconexão."""
         global flight_data
         flight_data["pilot_id"] = str(self.numeric_id); flight_data["vatsim_id"] = self.vatsim_id; flight_data["ivao_id"] = self.ivao_id
+        flight_data["client_disconnect"] = 0
         threading.Thread(target=self._connection_management_loop, daemon=True).start()
         
     def _connection_management_loop(self):
         RETRY_DELAY = 5 
         while self.running:
             print(f"Monitor ID: {self.numeric_id}. Tentando conectar a {WEBSOCKET_URL}...")
-            # Atualiza o websocket app para incluir o on_message
             self.ws_client = websocket.WebSocketApp(
                 WEBSOCKET_URL, 
                 on_open=self._on_open, 
                 on_error=self._on_error, 
                 on_close=self._on_close,
-                on_message=self._on_message # Adiciona o handler de mensagem
+                on_message=self._on_message 
             )
             self.ws_client.run_forever() 
             if self.running:
@@ -393,7 +390,6 @@ class FlightMonitor:
 
     def _on_open(self, ws):
         print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS] Conexão estabelecida. Enviando primeiro pacote de identificação...")
-        # NOVO: Envia o primeiro pacote APENAS com IDs. O servidor fará a verificação e responderá com START_TX.
         initial_payload = json.dumps({
             "pilot_id": str(self.numeric_id), 
             "vatsim_id": self.vatsim_id, 
@@ -402,29 +398,36 @@ class FlightMonitor:
         })
         ws.send(initial_payload)
         
-        # Inicia o loop de envio/coleta (que estará em espera)
         threading.Thread(target=self._send_data_loop, daemon=True).start()
 
     def _on_error(self, ws, error): 
         self.transmitting = False
+        self.master_app.after(0, self.master_app.current_frame.update_status, False, "ERRO DE CONEXÃO")
         print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS ERROR] {error}")
         
     def _on_close(self, ws, close_status_code, close_msg): 
-        self.transmitting = False # Para a transmissão se a conexão cair
+        self.transmitting = False 
+        self.master_app.after(0, self.master_app.current_frame.update_status, False, "DESCONECTADO")
         print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS] Conexão encerrada pelo servidor ou erro (Code: {close_status_code}).")
 
     def _on_message(self, ws, message):
-            """Recebe e processa comandos do servidor."""
+            """Recebe e processa comandos e alertas do servidor."""
             try:
                 data = json.loads(message)
-                command = data.get("command") # [NOVO] Captura o comando
+                command = data.get("command") 
                 
                 if command == "START_TX":
                     self.transmitting = True
+                    self.master_app.after(0, self.master_app.current_frame.update_status, True, "TRANSMITINDO (Online Rede)")
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] [CLIENT] Comando START_TX recebido. Iniciando transmissão de telemetria.")
-                elif command == "STOP_TX": # [NOVO] Manipula o comando STOP_TX
+                elif command == "STOP_TX": 
                     self.transmitting = False
+                    self.master_app.after(0, self.master_app.current_frame.update_status, False, "PAUSADO (Offline/Solo)")
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] [CLIENT] Comando STOP_TX recebido. Pausando transmissão de telemetria.")
+                elif command == "ALERT_CRITICAL":
+                    alert_message = data.get("message", "Alerta Crítico Indefinido.")
+                    self.master_app.after(0, lambda: messagebox.showwarning("ALERTA CRÍTICO DO SERVIDOR", alert_message))
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [ALERTA] Servidor: {alert_message}")
 
             except Exception as e:
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] [CLIENT] Erro ao receber mensagem do servidor: {e}")
@@ -432,20 +435,18 @@ class FlightMonitor:
     def _send_data_loop(self):
         global HEARTBEAT_INTERVAL, CONN_STATUS
         
+        simconnect_fail_logged = False
+        
         while self.running:
             
-            # GATE PRINCIPAL: Aguarda o comando START_TX do servidor
             if not self.transmitting:
-                time.sleep(1) # Espera 1 segundo e checa novamente
+                time.sleep(1) 
                 continue 
             
             try:
-                # O cliente agora coleta e envia dados apenas se autorizado (self.transmitting == True)
-                
                 fetch_all_data(); 
                 current_rounded = create_rounded_data(flight_data)
                 
-                # Heartbeat: Envia se houver mudança OU se o tempo limite for atingido
                 force_send = (time.time() - self.last_send_time) >= HEARTBEAT_INTERVAL
 
                 if has_significant_change(current_rounded, self.last_sent_data) or force_send:
@@ -453,6 +454,11 @@ class FlightMonitor:
                     self.last_sent_data = current_rounded.copy()
 
                     self.packets_sent_count += 1
+                    
+                    # Atualiza a GUI com os dados mais recentes
+                    self.master_app.after(0, self.master_app.current_frame.update_data, current_rounded)
+                    
+                    # Envia o pacote de dados
                     payload_to_send = json.dumps({
                         **current_rounded, 
                         'mb_sent': self.total_bytes_sent / (1024 * 1024),
@@ -465,17 +471,35 @@ class FlightMonitor:
                     self.ws_client.send(payload_to_send)
                     self.last_send_time = time.time() 
                 
-                # Short sleep para evitar busy loop
+                if simconnect_fail_logged:
+                    simconnect_fail_logged = False
+                    self.master_app.after(0, self.master_app.current_frame.update_sim_status, CONN_STATUS)
+                
                 time.sleep(0.1)
 
             except websocket.WebSocketConnectionClosedException: break 
             except Exception as e: 
-                # ----------------------------------------------------
                 # DETECÇÃO DE DESCONEXÃO DO SIMULADOR (SimConnect)
-                # ----------------------------------------------------
-                if CONN_STATUS == "REAL":
+                if CONN_STATUS == "REAL" and not simconnect_fail_logged:
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] [ERROR] SimConnect Exception: {e}. Assumindo simulador fechado/desconectado.")
-                    self.transmitting = False # Para a transmissão
+                    simconnect_fail_logged = True
+                    self.transmitting = False 
+                    self.master_app.after(0, self.master_app.current_frame.update_status, False, "SIMULADOR DESCONECTADO")
+                    self.master_app.after(0, self.master_app.current_frame.update_sim_status, f"{CONN_STATUS} (FALHA)")
+
+                    # NOVO: Envia um pacote de desconexão limpa ao servidor (client_disconnect: 1)
+                    try:
+                        flight_data["client_disconnect"] = 1 
+                        final_payload = json.dumps({
+                            **create_rounded_data(flight_data), 
+                            'client_disconnect': 1
+                        })
+                        self.ws_client.send(final_payload)
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS] Enviado sinal de desconexão (SimConnect Lost).")
+                        flight_data["client_disconnect"] = 0 
+                    except:
+                        pass 
+                    
                     break 
                 
                 time.sleep(0.1) 
@@ -510,7 +534,6 @@ class LoginFormFrame(ttk.Frame):
         email = self.email_var.get().strip(); password = self.password_var.get().strip(); remember = self.remember_var.get()
         if not email or not password: self.status_label.config(text="Preenchimento obrigatório.", bootstyle="danger"); return
         
-        # Inicia a thread para evitar travar a GUI
         threading.Thread(target=self._process_login, args=(email, password, remember), daemon=True).start()
         
     def _process_login(self, email: str, password: str, remember: bool):
@@ -519,34 +542,120 @@ class LoginFormFrame(ttk.Frame):
         
         if not check_login(email, password):
             self.master.after(0, lambda: self.status_label.config(text="Falha no login. Verifique e-mail/senha.", bootstyle="danger"))
-            delete_credentials(email); return # Limpa o email em caso de falha de login
+            delete_credentials(email); return 
             
         self.master.after(0, lambda: self.status_label.config(text="Login OK. Verificando status de piloto (2/3)...", bootstyle="info"))
         
         pilot_data = get_validated_pilot_data(email) 
         if not pilot_data:
             self.master.after(0, lambda: self.status_label.config(text="Login OK, mas piloto não está na lista de validados.", bootstyle="warning"))
-            delete_credentials(email); return # Limpa o email se o piloto for inválido
+            delete_credentials(email); return 
         
         if remember: save_credentials(email, password)
-        else: delete_credentials(email) # Limpa tudo se não for para lembrar (incluindo o email)
+        else: delete_credentials(email) 
             
         numeric_id = generate_pilot_numeric_id(email)
         self.master.after(0, lambda: self.status_label.config(text=f"Piloto Validado! ID: {numeric_id}", bootstyle="success"))
         self.master.after(1000, lambda: self.on_success(email, password, numeric_id, pilot_data))
 
 
+class MonitorFrame(ttk.Frame):
+    """
+    Painel de Monitoramento Detalhado e Dinâmico (Fix para KeyError: 'vs_label').
+    """
+    def __init__(self, master, pilot_id: int, conn_status: str, **kwargs):
+        super().__init__(master, padding=20, **kwargs)
+        self.pilot_id = pilot_id
+        self.vs_widget = None # Variável para armazenar a referência do widget VS
+        
+        # Dicionário para armazenar as variáveis de controle da GUI
+        self.data_vars = {
+            "alt_ind": ttk.StringVar(value="0 ft"), "vs": ttk.StringVar(value="0 fpm"), "ias": ttk.StringVar(value="0 kts"), 
+            "agl": ttk.StringVar(value="0 ft"), "g_force": ttk.StringVar(value="1.0 g"), "fuel": ttk.StringVar(value="0 gal")
+        }
+        
+        # --- Layout Principal ---
+        ttk.Label(self, text=f"Monitor de Telemetria", font=("TkDefaultFont", 12, "bold")).pack(pady=(0, 10))
+        
+        # Indicador de Status de Conexão SimConnect
+        self.status_frame = ttk.Frame(self); self.status_frame.pack(fill='x', pady=5)
+        ttk.Label(self.status_frame, text=f"ID: {pilot_id} | SimConnect:").grid(row=0, column=0, padx=5, sticky='w')
+        self.sim_status_label = ttk.Label(self.status_frame, text=conn_status, bootstyle="info"); self.sim_status_label.grid(row=0, column=1, sticky='e')
+        
+        ttk.Separator(self).pack(fill='x', pady=5)
+        
+        # Indicador de Status de Transmissão (Principal)
+        self.tx_status_label = ttk.Label(self, text="AGUARDANDO SERVIDOR...", font=("TkDefaultFont", 10, "bold"), bootstyle="warning"); self.tx_status_label.pack(fill='x', pady=5)
+        
+        ttk.Separator(self).pack(fill='x', pady=10)
+        
+        # Painel de Dados em Tempo Real (NOVO PAINEL VISUAL)
+        data_frame = ttk.Frame(self); data_frame.pack(fill='both', expand=True)
+        
+        self._create_data_row(data_frame, "ALTITUDE (MSL):", "alt_ind", 0)
+        self._create_data_row(data_frame, "VS (FPM):", "vs", 1)
+        self._create_data_row(data_frame, "IAS (KTS):", "ias", 2)
+        self._create_data_row(data_frame, "AGL (FT):", "agl", 3)
+        self._create_data_row(data_frame, "G-FORCE:", "g_force", 4)
+        self._create_data_row(data_frame, "TOTAL FUEL:", "fuel", 5)
+        
+        # Botão de Logoff
+        ttk.Separator(self).pack(fill='x', pady=10)
+        ttk.Button(self, text="Logoff", command=master._handle_logoff, bootstyle="danger-outline").pack(pady=(5, 0))
+
+
+    def _create_data_row(self, parent, label_text, var_key, row_num):
+        row = ttk.Frame(parent, padding=2); row.pack(fill='x')
+        ttk.Label(row, text=label_text, width=15).pack(side='left', padx=(0, 10))
+        
+        # CHAVE 1: Cria o widget de valor
+        value_widget = ttk.Label(row, textvariable=self.data_vars[var_key], font=("-size 11 -weight bold"), bootstyle="light")
+        value_widget.pack(side='right', fill='x', expand=True)
+
+        # CHAVE 2: Armazena a referência para o widget VS (para mudança de cor)
+        if var_key == "vs":
+            self.vs_widget = value_widget
+
+
+    def update_data(self, data: dict):
+        """Atualiza todas as variáveis da GUI com os novos dados."""
+        # Formata com ponto como separador de milhar (para pt-BR)
+        self.data_vars["alt_ind"].set(f"{int(data['alt_ind']):,} ft".replace(',', '.'))
+        self.data_vars["vs"].set(f"{int(data['vs']):,} fpm".replace(',', '.'))
+        self.data_vars["ias"].set(f"{data['ias']:.1f} kts")
+        self.data_vars["agl"].set(f"{int(data['agl']):,} ft".replace(',', '.'))
+        self.data_vars["g_force"].set(f"{data['g_force']:.1f} g")
+        self.data_vars["fuel"].set(f"{int(data['total_fuel']):,} gal".replace(',', '.'))
+        
+        # Atualiza a cor da VS usando a referência armazenada
+        if self.vs_widget:
+            if data['vs'] > 100:
+                self.data_vars["vs"].set(f"+{self.data_vars['vs'].get()}")
+                self.vs_widget.config(bootstyle="success")
+            elif data['vs'] < -100:
+                self.vs_widget.config(bootstyle="danger")
+            else:
+                self.vs_widget.config(bootstyle="light")
+
+
+    def update_status(self, is_transmitting: bool, message: str):
+        """Atualiza o status de transmissão."""
+        style = "success" if is_transmitting else "danger"
+        self.tx_status_label.config(text=message, bootstyle=style)
+
+    def update_sim_status(self, message: str):
+        """Atualiza o status do SimConnect."""
+        self.sim_status_label.config(text=message, bootstyle="info")
+            
+
 class MainApplication(ttk.Window):
     def __init__(self):
         super().__init__(themename="darkly")
         self.title(f"Monitor de Voo - Login {VA_KEY}"); self.geometry("300x480"); self.resizable(False, False)
         
-        # NOVO: Flag para controle da atualização
         self._update_in_progress = False 
         
-        # --- DEFINIÇÃO DO ÍCONE DA APLICAÇÃO ---
         try:
-            # Assume que os caminhos são relativos ao script principal (client.py)
             base_dir = os.path.dirname(os.path.abspath(__file__))
             icon_path = os.path.join(base_dir, 'assets', 'icons', 'skymetrics.ico')
             self.iconbitmap(icon_path)
@@ -555,13 +664,9 @@ class MainApplication(ttk.Window):
             
         self.monitor = None
         self.current_frame = None
-        self.current_pilot_email = None # Para gerenciar o logoff
+        self.current_pilot_email = None 
         self.protocol("WM_DELETE_WINDOW", self._on_app_closing)
         
-        # CORREÇÃO: Removendo a checagem imediata na thread de background para evitar duplicação.
-        # Agora, a checagem periódica (agendada) fará a primeira verificação após 1 segundo.
-        
-        # NOVO: Inicia o loop de verificação de atualização periódica
         self.after(1000, self.start_periodic_update_check)
         
         # Tenta Login Automático
@@ -571,7 +676,6 @@ class MainApplication(ttk.Window):
         else:
             self._show_login_form()
 
-    # NOVO: Método auxiliar para parar monitoramento e SimConnect
     def stop_monitor_and_simconnect(self):
         """Encerra o monitor de forma segura e a conexão SimConnect."""
         global sm, CONN_STATUS
@@ -586,40 +690,31 @@ class MainApplication(ttk.Window):
             except Exception as e:
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] [AVISO] Falha ao fechar SimConnect: {e}")
 
-    # NOVO: Método para checagem de atualização periódica
     def start_periodic_update_check(self):
-        """Inicia o loop de checagem de atualização a cada 5 minutos (300 segundos)."""
-        # Verifica se a janela ainda existe e se a atualização não foi iniciada
+        """Inicia o loop de checagem de atualização a cada 60 minutos (3600 segundos)."""
         if not self.winfo_exists() or self._update_in_progress:
             return
 
-        # Cria a thread de checagem em modo silencioso
-        # O `check_for_update` (externo) usará a flag `_update_in_progress` para se proteger.
         threading.Thread(target=check_for_update, args=(self, True), daemon=True).start()
         
-        # Agenda a próxima checagem para daqui a 5 minutos
         self.after(60 * 60 * 1000, self.start_periodic_update_check)
 
     def _attempt_auto_login(self, email: str, password: str):
         """Inicia o formulário e tenta logar automaticamente."""
-        # Usa o LoginFormFrame para gerenciar a lógica de threading de login
         self.login_frame = LoginFormFrame(self, on_success=self._on_login_success) 
         self.login_frame.pack(fill=BOTH, expand=YES)
         self.current_frame = self.login_frame
         
-        # Preenche os campos para visualização
         self.login_frame.email_var.set(email)
         self.login_frame.password_var.set(password)
         self.login_frame.remember_var.set(True)
         
         self.login_frame.status_label.config(text="Tentando Login Automático...", bootstyle="info")
         
-        # Inicia a tentativa de login no thread de background
         threading.Thread(target=self.login_frame._process_login, args=(email, password, True), daemon=True).start()
 
 
     def _on_app_closing(self):
-        # Verifica se está atualizando antes de tentar fechar SimConnect/Monitor
         if self._update_in_progress:
              self.destroy()
              return
@@ -628,10 +723,8 @@ class MainApplication(ttk.Window):
         self.destroy()
 
     def _show_login_form(self):
-        # Limpa o frame anterior, se houver
         if self.current_frame: self.current_frame.destroy()
         
-        # Redefine o tamanho para a tela de login
         self.geometry("300x480") 
         
         self.login_frame = LoginFormFrame(self, on_success=self._on_login_success) 
@@ -639,45 +732,33 @@ class MainApplication(ttk.Window):
         self.current_frame = self.login_frame
 
     def _on_login_success(self, email: str, password: str, numeric_id: int, pilot_data: dict):
-        # Limpa o frame de login
         if self.current_frame: self.current_frame.destroy()
         
-        # Salva o email do piloto logado
         self.current_pilot_email = email
         
-        self.geometry("350x200") # Novo tamanho para a tela do monitor
+        self.geometry("350x380") 
+        self.resizable(False, False)
         self.title(f"Monitor de Voo {VA_KEY} - ID: {numeric_id}")
         
-        # Inicializa e inicia o monitor
-        self.monitor = FlightMonitor(email, numeric_id, pilot_data)
+        self.monitor = FlightMonitor(email, numeric_id, pilot_data, self)
         self.monitor.start_monitor()
         
         print("-" * 50); print("CONEXÃO ESTABELECIDA E MONITOR DE DADOS INICIADO!"); print("-" * 50)
         
-        # Cria o Frame do Monitor (Nova tela principal)
-        monitor_frame = ttk.Frame(self, padding=20)
+        # Cria o Novo Painel de Monitoramento (MonitorFrame)
+        monitor_frame = MonitorFrame(self, numeric_id, CONN_STATUS)
         monitor_frame.pack(fill=BOTH, expand=YES)
         self.current_frame = monitor_frame
-        
-        ttk.Label(monitor_frame, text=f"Transmissão iniciada para ID: {numeric_id}", font=("TkDefaultFont", 12, "bold")).pack(pady=(10, 5))
-        ttk.Label(monitor_frame, text=f"Status SimConnect: {CONN_STATUS}", font=("TkDefaultFont", 10), bootstyle="info").pack(pady=5)
-        
-        # Botão de Logoff
-        ttk.Separator(monitor_frame, bootstyle="light").pack(fill='x', pady=10)
-        ttk.Button(monitor_frame, text="Logoff", command=self._handle_logoff, bootstyle="warning-outline").pack(pady=10)
 
     def _handle_logoff(self):
         """Encerra o monitor, apaga a senha e desativa o autologin, mantendo o email."""
         
-        # 1. Encerra o monitor de forma segura e o SimConnect
         self.stop_monitor_and_simconnect()
         
-        # 2. Apaga a senha e desativa o autologin, MANTENDO O EMAIL.
         if self.current_pilot_email:
             delete_credentials(self.current_pilot_email, clear_email=False)
             print("-" * 50); print(f"Logoff bem-sucedido. A senha de '{self.current_pilot_email}' foi removida. O email foi mantido para a próxima vez."); print("-" * 50)
 
-        # 3. Retorna à tela de login
         self._show_login_form()
 
 
