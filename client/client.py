@@ -47,6 +47,10 @@ UPDATE_CHECK_URL = "https://kafly.com.br/skymetrics/update/current_version.txt"
 UPDATE_EXECUTABLE_NAME = "updater.exe" 
 UPDATE_CHECK_LOCK = Lock()
 
+# --- Códigos de Decisão para o Fluxo de Inicialização ---
+DECISION_PROCEED_TO_LOGIN = 1
+DECISION_INITIATE_UPDATE = 2
+
 # --- Carregar Configurações do Arquivo ---
 config = configparser.ConfigParser()
 config.read(CONFIG_FILE)
@@ -102,8 +106,7 @@ DATA_PRECISION = {
 }
 
 # =================================================================
-# 2. FUNÇÕES DE LÓGICA DE ATUALIZAÇÃO
-# (Conteúdo da Seção 2 inalterado)
+# 2. FUNÇÕES DE LÓGICA DE ATUALIZAÇÃO (Fluxo Síncrono/Modal)
 # =================================================================
 
 def _compare_versions(current_v, latest_v):
@@ -128,75 +131,71 @@ def _compare_versions(current_v, latest_v):
         print(f"[{datetime.now().strftime('%H:%M:%S')}] [ERRO] ao comparar versões: {e}")
         return False
 
-def initiate_update_and_exit(app_instance, latest_version):
-    """Inicia o updater.exe e fecha o aplicativo principal."""
+def initiate_update_and_exit_sync(app_instance, latest_version):
+    """
+    Exibe o diálogo modal de atualização e retorna a decisão do usuário.
+    É chamado do thread de fundo, mas executa o modal na thread principal (GUI).
+    """
     
-    if app_instance._update_in_progress:
-        return
+    # Use a barreira para bloquear o thread de fundo até que o modal retorne
+    decision_lock = threading.Lock()
+    decision_lock.acquire()
+    
+    user_decision = [DECISION_PROCEED_TO_LOGIN] # [status_code]
+    
+    def show_modal():
+        message = (
+            f"Uma nova versão ({latest_version}) do Cliente Monitor está disponível (versão atual: {CURRENT_VERSION}).\n\n"
+            "⚠️ ATENÇÃO: Esta é uma atualização crítica. Não atualizar pode resultar em erros de conexão.\n\n"
+            "Deseja atualizar agora? (SIM para atualizar e encerrar; NÃO para continuar com a versão atual)"
+        )
+        user_accepted = messagebox.askyesno("Atualização Crítica Disponível", message)
+        
+        if user_accepted:
+            user_decision[0] = DECISION_INITIATE_UPDATE
+        else:
+            user_decision[0] = DECISION_PROCEED_TO_LOGIN
+            
+        decision_lock.release()
 
-    message = (
-        f"Uma nova versão ({latest_version}) do Cliente Monitor está disponível (versão atual: {CURRENT_VERSION}).\n\n"
-        "⚠️ ATENÇÃO: Esta é uma atualização crítica. Não atualizar pode resultar em erros de conexão.\n\n"
-        "O aplicativo será fechado imediatamente para iniciar o processo de atualização automática.\n\n"
-        "Deseja atualizar agora?"
-    )
+    # Envia a exibição do modal para a thread principal da GUI
+    app_instance.after(0, show_modal)
     
-    if not messagebox.askyesno("Atualização Crítica Disponível", message):
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] [AVISO] Atualização de {latest_version} IGNORADA pelo usuário.")
-        return
+    # Bloqueia o thread de fundo até que o modal seja fechado
+    decision_lock.acquire()
+    decision_lock.release()
+    
+    return user_decision[0]
 
-    app_instance._update_in_progress = True
-    
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] [INFO] Iniciando processo de atualização...")
-    
-    app_instance.stop_monitor_and_simconnect()
+def check_for_update_sync(app_instance):
+    """Verifica a versão mais recente e retorna a decisão de seguir ou atualizar (I/O Blocking)."""
     
     try:
-        Popen([UPDATE_EXECUTABLE_NAME, latest_version])
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] [SUCESSO] Executado {UPDATE_EXECUTABLE_NAME} com argumento {latest_version}. Encerrando o Monitor.")
-    except FileNotFoundError:
-         print(f"[{datetime.now().strftime('%H:%M:%S')}] [ERRO] O arquivo {UPDATE_EXECUTABLE_NAME} não foi encontrado. Atualização abortada.")
-    except Exception as e:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] [ERRO] ao executar o updater: {e}")
-    
-    app_instance.destroy()
+        app_instance.after(0, lambda: app_instance.title(f"Monitor de Voo - Verificando Atualização..."))
 
-def check_for_update(app_instance, silent=False):
-    """Verifica a versão mais recente e inicia a atualização se necessário."""
-    
-    with UPDATE_CHECK_LOCK:
-        try:
-            if not app_instance.winfo_exists() or app_instance._update_in_progress:
-                return False 
-                
-            if not silent:
-                 print(f"[{datetime.now().strftime('%H:%M:%S')}] [INFO] Checando por novas versões em {UPDATE_CHECK_URL}...")
-                 
-            response = requests.get(UPDATE_CHECK_URL, timeout=5)
-            response.raise_for_status()
+        response = requests.get(UPDATE_CHECK_URL, timeout=5)
+        response.raise_for_status()
+        
+        latest_version = response.text.strip()
+        
+        if _compare_versions(CURRENT_VERSION, latest_version):
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] [ALERTA] Nova versão {latest_version} disponível (atual: {CURRENT_VERSION}).")
             
-            latest_version = response.text.strip()
+            # Update encontrado, chama o modal e espera o resultado
+            decision = initiate_update_and_exit_sync(app_instance, latest_version)
             
-            if _compare_versions(CURRENT_VERSION, latest_version):
-                if not silent:
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [ALERTA] Nova versão {latest_version} disponível (atual: {CURRENT_VERSION}). Iniciando diálogo...")
-                
-                app_instance.after(0, initiate_update_and_exit, app_instance, latest_version)
-                
-                return True
-            else:
-                if not silent:
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [INFO] A versão atual ({CURRENT_VERSION}) é a mais recente.")
-                return False
-                
-        except requests.exceptions.RequestException as e:
-            if not silent:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] [AVISO] Falha ao verificar atualização (Conexão/Timeout): {e}")
-            return False
-        except Exception as e:
-            if not silent:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] [ERRO] inesperado ao verificar atualização: {e}")
-            return False
+            return decision, latest_version
+        else:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] [INFO] A versão atual ({CURRENT_VERSION}) é a mais recente.")
+            return DECISION_PROCEED_TO_LOGIN, None
+            
+    except requests.exceptions.RequestException as e:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [AVISO] Falha ao verificar atualização (Conexão/Timeout): {e}")
+        return DECISION_PROCEED_TO_LOGIN, None
+    except Exception as e:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [ERRO] inesperado ao verificar atualização: {e}")
+        return DECISION_PROCEED_TO_LOGIN, None
+
 
 # =================================================================
 # 3. LÓGICA DE AUTENTICAÇÃO, ID e CREDENCIAIS
@@ -710,7 +709,8 @@ class MonitorFrame(ttk.Frame):
 class MainApplication(ttk.Window):
     def __init__(self):
         super().__init__(themename="darkly")
-        self.title(f"Monitor de Voo - Login {VA_KEY}"); self.geometry("300x480"); self.resizable(False, False)
+        self.title(f"Monitor de Voo - Inicializando...")
+        self.geometry("300x480"); self.resizable(False, False)
         
         self._update_in_progress = False 
         
@@ -730,14 +730,80 @@ class MainApplication(ttk.Window):
         self.tray_icon = None
         self.minimized_to_tray = False
         
-        self.after(1000, self.start_periodic_update_check)
+        # 🟢 APLICA CENTRALIZAÇÃO INICIAL
+        self._center_window()
+
+        # 1. Start the main flow of the application in a separate thread
+        threading.Thread(target=self._initial_flow_thread, daemon=True).start()
+
+    def _center_window(self):
+        """Calcula e aplica a geometria para centralizar a janela na tela."""
+        # Garante que as dimensões da janela foram calculadas
+        self.update_idletasks()
         
-        # Tenta Login Automático
-        email, password, remember_me = load_credentials()
-        if email and password and remember_me:
-             self._attempt_auto_login(email, password)
-        else:
-            self._show_login_form()
+        # Obtém a largura e altura da janela
+        width = self.winfo_width()
+        height = self.winfo_height()
+        
+        # Obtém a largura e altura da tela
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        
+        # Calcula a posição central
+        x = (screen_width // 2) - (width // 2)
+        y = (screen_height // 2) - (height // 2)
+        
+        # Define a nova geometria
+        self.geometry(f'+{x}+{y}')
+        
+    def _initial_flow_thread(self):
+        """
+        Thread de inicialização que executa a verificação de atualização e decide a próxima etapa.
+        """
+        # Step 1: Check for updates (Blocking I/O + potentially blocking Modal)
+        decision, latest_version = check_for_update_sync(self)
+        
+        # Step 2: Dispatch the result back to the main GUI thread
+        self.after(0, self._handle_update_decision, decision, latest_version)
+        
+    def _handle_update_decision(self, decision, latest_version):
+        """
+        Função chamada na Thread Principal (GUI) para processar o resultado da checagem de update.
+        """
+        self.title(f"Monitor de Voo - Login {VA_KEY}") # Restaura título após o check
+
+        if decision == DECISION_INITIATE_UPDATE:
+            # Usuário aceitou atualização: inicia atualização e encerra
+            self._initiate_update_final_step(latest_version)
+        
+        elif decision == DECISION_PROCEED_TO_LOGIN:
+            # Sem atualização ou usuário recusou: procede com o fluxo de login
+            email, password, remember_me = load_credentials()
+            
+            # Inicia a verificação de update periódica (agora em segundo plano)
+            self.after(60 * 60 * 1000, self.start_periodic_update_check)
+            
+            if email and password and remember_me:
+                 self._attempt_auto_login(email, password)
+            else:
+                 self._show_login_form()
+
+    def _initiate_update_final_step(self, latest_version):
+        """Passos de execução final para atualização aceita."""
+        self._update_in_progress = True
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [INFO] Iniciando processo de atualização final...")
+        
+        self.stop_monitor_and_simconnect()
+        
+        try:
+            Popen([UPDATE_EXECUTABLE_NAME, latest_version])
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] [SUCESSO] Executado {UPDATE_EXECUTABLE_NAME} com argumento {latest_version}. Encerrando o Monitor.")
+        except FileNotFoundError:
+             print(f"[{datetime.now().strftime('%H:%M:%S')}] [ERRO] O arquivo {UPDATE_EXECUTABLE_NAME} não foi encontrado. Atualização abortada.")
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] [ERRO] ao executar o updater: {e}")
+        
+        self.destroy()
 
     # NOVO: Lógica do Ícone de Bandeja
     def _show_window_from_tray(self, icon, item):
@@ -800,7 +866,6 @@ class MainApplication(ttk.Window):
             self.deiconify()
             self.minimized_to_tray = False
 
-
     def stop_monitor_and_simconnect(self):
         """Encerra o monitor de forma segura e a conexão SimConnect."""
         global sm, CONN_STATUS
@@ -820,7 +885,11 @@ class MainApplication(ttk.Window):
         if not self.winfo_exists() or self._update_in_progress:
             return
 
-        threading.Thread(target=check_for_update, args=(self, True), daemon=True).start()
+        # A verificação de atualização periódica executa em segundo plano e não bloqueia o fluxo principal.
+        def periodic_check():
+            check_for_update_sync(self)
+            
+        threading.Thread(target=periodic_check, daemon=True).start()
         
         self.after(60 * 60 * 1000, self.start_periodic_update_check)
 
@@ -855,6 +924,7 @@ class MainApplication(ttk.Window):
         if self.current_frame: self.current_frame.destroy()
         
         self.geometry("300x480") 
+        self._center_window() # 🟢 CENTRALIZA O FORM DE LOGIN
         
         self.login_frame = LoginFormFrame(self, on_success=self._on_login_success) 
         self.login_frame.pack(fill=BOTH, expand=YES)
@@ -873,6 +943,8 @@ class MainApplication(ttk.Window):
         
         self.geometry("350x380") 
         self.resizable(False, False)
+        self._center_window() # 🟢 CENTRALIZA APÓS REDIMENSIONAMENTO PARA O MONITOR
+        
         # MODIFICADO: Exibe o nome do piloto no título
         self.title(f"Monitor de Voo {VA_KEY} - Piloto: {display_name}")
         
@@ -888,7 +960,7 @@ class MainApplication(ttk.Window):
         monitor_frame.pack(fill=BOTH, expand=YES)
         self.current_frame = monitor_frame
         
-        # NOVO: Minimiza para a bandeja após sucesso
+        # MINIMIZAÇÃO: Ocorre 500ms após o display do MonitorFrame.
         self.after(500, self._start_tray_icon)
 
     def _handle_logoff(self):
