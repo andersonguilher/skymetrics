@@ -170,9 +170,7 @@ def check_for_update(app_instance, silent=False):
 # =================================================================
 # 3. LÓGICA DE AUTENTICAÇÃO, ID e CREDENCIAIS
 # =================================================================
-def generate_pilot_numeric_id(email: str) -> int:
-    email_bytes = email.lower().encode('utf-8')
-    return zlib.crc32(email_bytes) & 0xFFFFFFFF 
+# REMOVIDO: A função generate_pilot_numeric_id não é mais usada para o ID do piloto.
 
 def check_login(email: str, password: str) -> bool:
     url = KAFY_BASE_URL + LOGIN_ENDPOINT
@@ -283,6 +281,8 @@ try:
     from SimConnect import SimConnect, AircraftRequests
     sm = SimConnect(); aq = AircraftRequests(sm); CONN_STATUS = "REAL" 
 except Exception as e:
+    # MODIFICADO: Loga o erro específico de inicialização do SimConnect.
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] [SIMCONNECT ERROR] Falha na inicialização do SimConnect. Usando modo SIMULADO. Erro: {e}")
     sm = MockSimConnect(); aq = MockAircraftRequests(sm); CONN_STATUS = "SIMULADO" 
 
 # --- ESTRUTURA DE DADOS COMPLETA (Skymetrics) ---
@@ -290,7 +290,7 @@ flight_data = {
     "alt_ind": 0, "vs": 0.0, "ias": 0, "tas": 0, "agl": 0, "on_ground": 0, "total_fuel": 0, "gear_left_pos": 0, "g_force": 1.0, "engine_count": 0,
     "lat": 0.0, "lng": 0.0, "eng_combustion": 0, "light_beacon_on": 0, "light_landing_on": 0, "light_strobe_on": 0, "plane_bank_degrees": 0.0, 
     "engine_vibration_1": 0.0,
-    "pilot_id": "", "vatsim_id": "", "ivao_id": "", 
+    "pilot_name": "N/A", "vatsim_id": "", "ivao_id": "", # MODIFICADO: 'pilot_id' substituído por 'pilot_name'
     "alerts": {"overspeed_warning": 0, "stall_warning": 0, "beacon_off_engine_on": 0, "engine_fire": 0, "stall_protection_active": 0, "gpws_warning": 0, "flaps_speed_exceeded": 0, "gear_warning_system_active": 0,},
     "client_disconnect": 0, 
 }
@@ -357,8 +357,9 @@ def has_significant_change(current_data, last_data):
 # =================================================================
 
 class FlightMonitor:
-    def __init__(self, pilot_email: str, numeric_id: int, pilot_data: dict, master_app: 'MainApplication'):
-        self.pilot_email = pilot_email; self.numeric_id = numeric_id
+    # MODIFICADO: numeric_id substituído por display_name
+    def __init__(self, pilot_email: str, display_name: str, pilot_data: dict, master_app: 'MainApplication'):
+        self.pilot_email = pilot_email; self.display_name = display_name # NOVO: Armazena o nome
         self.vatsim_id = pilot_data.get('vatsim_id', 'N/A'); self.ivao_id = pilot_data.get('ivao_id', 'N/A')
         self.running = True; self.ws_client = None; self.last_sent_data = None; self.packets_sent_count = 0; self.total_bytes_sent = 0.0
         self.last_send_time = time.time() 
@@ -368,14 +369,17 @@ class FlightMonitor:
     def start_monitor(self):
         """Inicia a thread de gerenciamento de conexão e reconexão."""
         global flight_data
-        flight_data["pilot_id"] = str(self.numeric_id); flight_data["vatsim_id"] = self.vatsim_id; flight_data["ivao_id"] = self.ivao_id
+        # MODIFICADO: Atualiza pilot_name em vez de pilot_id
+        flight_data["pilot_name"] = self.display_name; 
+        flight_data["vatsim_id"] = self.vatsim_id; 
+        flight_data["ivao_id"] = self.ivao_id
         flight_data["client_disconnect"] = 0
         threading.Thread(target=self._connection_management_loop, daemon=True).start()
         
     def _connection_management_loop(self):
         RETRY_DELAY = 5 
         while self.running:
-            print(f"Monitor ID: {self.numeric_id}. Tentando conectar a {WEBSOCKET_URL}...")
+            print(f"Monitor Piloto: {self.display_name}. Tentando conectar a {WEBSOCKET_URL}...")
             self.ws_client = websocket.WebSocketApp(
                 WEBSOCKET_URL, 
                 on_open=self._on_open, 
@@ -390,8 +394,9 @@ class FlightMonitor:
 
     def _on_open(self, ws):
         print(f"[{datetime.now().strftime('%H:%M:%S')}] [WS] Conexão estabelecida. Enviando primeiro pacote de identificação...")
+        # MODIFICADO: Envia pilot_name em vez de pilot_id
         initial_payload = json.dumps({
-            "pilot_id": str(self.numeric_id), 
+            "pilot_name": self.display_name, 
             "vatsim_id": self.vatsim_id, 
             "ivao_id": self.ivao_id,
             "packets_sent": 0, "mb_sent": 0.0
@@ -506,7 +511,8 @@ class FlightMonitor:
 
 
 class LoginFormFrame(ttk.Frame):
-    def __init__(self, master, on_success: Callable[[str, str, int, dict], None], **kwargs):
+    # MODIFICADO: A assinatura da função on_success agora recebe o nome (str) em vez do ID (int)
+    def __init__(self, master, on_success: Callable[[str, str, str, dict], None], **kwargs):
         super().__init__(master, padding=30, **kwargs)
         self.on_success = on_success
         self.email_var = ttk.StringVar(); self.password_var = ttk.StringVar(); self.remember_var = ttk.BooleanVar(value=False) 
@@ -551,21 +557,25 @@ class LoginFormFrame(ttk.Frame):
             self.master.after(0, lambda: self.status_label.config(text="Login OK, mas piloto não está na lista de validados.", bootstyle="warning"))
             delete_credentials(email); return 
         
+        # NOVO: Obtém o nome de exibição para usar como identificador
+        display_name = pilot_data.get('display_name', 'PILOTO DESCONHECIDO')
+
         if remember: save_credentials(email, password)
         else: delete_credentials(email) 
             
-        numeric_id = generate_pilot_numeric_id(email)
-        self.master.after(0, lambda: self.status_label.config(text=f"Piloto Validado! ID: {numeric_id}", bootstyle="success"))
-        self.master.after(1000, lambda: self.on_success(email, password, numeric_id, pilot_data))
+        # MODIFICADO: Usa o nome de exibição em vez do ID numérico
+        self.master.after(0, lambda: self.status_label.config(text=f"Piloto Validado! Nome: {display_name}", bootstyle="success"))
+        self.master.after(1000, lambda: self.on_success(email, password, display_name, pilot_data))
 
 
 class MonitorFrame(ttk.Frame):
     """
     Painel de Monitoramento Detalhado e Dinâmico (Fix para KeyError: 'vs_label').
     """
-    def __init__(self, master, pilot_id: int, conn_status: str, **kwargs):
+    # MODIFICADO: pilot_id (int) substituído por pilot_name (str)
+    def __init__(self, master, pilot_name: str, conn_status: str, **kwargs):
         super().__init__(master, padding=20, **kwargs)
-        self.pilot_id = pilot_id
+        self.pilot_name = pilot_name
         self.vs_widget = None # Variável para armazenar a referência do widget VS
         
         # Dicionário para armazenar as variáveis de controle da GUI
@@ -579,7 +589,8 @@ class MonitorFrame(ttk.Frame):
         
         # Indicador de Status de Conexão SimConnect
         self.status_frame = ttk.Frame(self); self.status_frame.pack(fill='x', pady=5)
-        ttk.Label(self.status_frame, text=f"ID: {pilot_id} | SimConnect:").grid(row=0, column=0, padx=5, sticky='w')
+        # MODIFICADO: Exibe o nome do piloto
+        ttk.Label(self.status_frame, text=f"Piloto: {pilot_name} | SimConnect:").grid(row=0, column=0, padx=5, sticky='w')
         self.sim_status_label = ttk.Label(self.status_frame, text=conn_status, bootstyle="info"); self.sim_status_label.grid(row=0, column=1, sticky='e')
         
         ttk.Separator(self).pack(fill='x', pady=5)
@@ -731,22 +742,26 @@ class MainApplication(ttk.Window):
         self.login_frame.pack(fill=BOTH, expand=YES)
         self.current_frame = self.login_frame
 
-    def _on_login_success(self, email: str, password: str, numeric_id: int, pilot_data: dict):
+    # MODIFICADO: numeric_id substituído por display_name
+    def _on_login_success(self, email: str, password: str, display_name: str, pilot_data: dict):
         if self.current_frame: self.current_frame.destroy()
         
         self.current_pilot_email = email
         
         self.geometry("350x380") 
         self.resizable(False, False)
-        self.title(f"Monitor de Voo {VA_KEY} - ID: {numeric_id}")
+        # MODIFICADO: Exibe o nome do piloto no título
+        self.title(f"Monitor de Voo {VA_KEY} - Piloto: {display_name}")
         
-        self.monitor = FlightMonitor(email, numeric_id, pilot_data, self)
+        # MODIFICADO: Passa o nome do piloto para o FlightMonitor
+        self.monitor = FlightMonitor(email, display_name, pilot_data, self)
         self.monitor.start_monitor()
         
         print("-" * 50); print("CONEXÃO ESTABELECIDA E MONITOR DE DADOS INICIADO!"); print("-" * 50)
         
         # Cria o Novo Painel de Monitoramento (MonitorFrame)
-        monitor_frame = MonitorFrame(self, numeric_id, CONN_STATUS)
+        # MODIFICADO: Passa o nome do piloto para o MonitorFrame
+        monitor_frame = MonitorFrame(self, display_name, CONN_STATUS)
         monitor_frame.pack(fill=BOTH, expand=YES)
         self.current_frame = monitor_frame
 
