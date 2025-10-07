@@ -492,7 +492,7 @@ class FlightMonitor:
                     self.master_app.after(0, self.master_app.current_frame.update_status, False, "SIMULADOR DESCONECTADO")
                     self.master_app.after(0, self.master_app.current_frame.update_sim_status, f"{CONN_STATUS} (FALHA)")
 
-                    # NOVO: Envia um pacote de desconexão limpa ao servidor (client_disconnect: 1)
+                    # Envia um pacote de desconexão limpa ao servidor (client_disconnect: 1)
                     try:
                         flight_data["client_disconnect"] = 1 
                         final_payload = json.dumps({
@@ -505,10 +505,22 @@ class FlightMonitor:
                     except:
                         pass 
                     
-                    break 
+                    # **********************************************
+                    # 🟢 CORREÇÃO CRÍTICA: Fechar a conexão SimConnect de forma limpa.
+                    # Isso tenta evitar que o SimConnect DLL cause o erro fatal do SO.
+                    global sm
+                    if sm:
+                        try:
+                            sm.exit()
+                            sm = None # Define como None para forçar a re-inicialização no próximo ciclo (se necessário)
+                            print(f"[{datetime.now().strftime('%H:%M:%S')}] [INFO] SimConnect encerrado preventivamente.")
+                        except Exception as sim_err:
+                            print(f"[{datetime.now().strftime('%H:%M:%S')}] [AVISO] Falha ao fechar SimConnect: {sim_err}")
+                    # **********************************************
+                    
+                    break # Sai do loop de envio de dados.
                 
                 time.sleep(0.1) 
-
 
 class LoginFormFrame(ttk.Frame):
     # MODIFICADO: A assinatura da função on_success agora recebe o nome (str) em vez do ID (int)
