@@ -4,3 +4,5 @@ requests
 keyring
 configparser
 websocket-client
+pystray
+Pillow

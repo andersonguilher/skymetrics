@@ -24,6 +24,16 @@ from subprocess import Popen
 from threading import Lock 
 from tkinter import messagebox 
 
+# NOVO: Módulos para System Tray
+try:
+    from PIL import Image
+    import pystray 
+    PYSTRAY_AVAILABLE = True
+except ImportError:
+    PYSTRAY_AVAILABLE = False
+    print("[AVISO] pystray/Pillow não encontrados. O recurso de ícone de bandeja será desativado.")
+
+
 # =================================================================
 # 1. CONSTANTES E CONFIGURAÇÃO
 # =================================================================
@@ -55,6 +65,26 @@ WEBSOCKET_URL = config.get(CLIENT_CONFIG_SECTION, 'websocket_url', fallback='ws:
 HEARTBEAT_INTERVAL = config.getint(CLIENT_CONFIG_SECTION, 'heartbeat_interval', fallback=5)
 
 
+# FUNÇÃO PARA GERENCIAMENTO DE CAMINHO DE RECURSOS (PyInstaller-compatible)
+def _get_resource_path(relative_path):
+    """ Obtém o caminho absoluto para um recurso, funcionando com PyInstaller. """
+    try:
+        if getattr(sys, 'frozen', False):
+            # No modo PyInstaller, os assets estão em uma pasta chamada 'assets' 
+            # criada pelo argumento --add-data "client/assets;assets" (do build.bat).
+            # A base é sys._MEIPASS.
+            return os.path.join(sys._MEIPASS, 'assets', relative_path)
+        else:
+            # No modo de desenvolvimento, a pasta de assets está em 'client/assets' 
+            # ou 'assets' dependendo de onde o script está rodando.
+            # O caminho relativo a partir de 'client.py' é '../assets'.
+            return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', relative_path)
+    except Exception:
+        return relative_path
+
+ICON_PATH = _get_resource_path('icons/skymetrics.ico')
+
+
 # --- Variáveis Globais de Estado ---
 CONN_STATUS = "REAL" 
 sm = None 
@@ -73,6 +103,7 @@ DATA_PRECISION = {
 
 # =================================================================
 # 2. FUNÇÕES DE LÓGICA DE ATUALIZAÇÃO
+# (Conteúdo da Seção 2 inalterado)
 # =================================================================
 
 def _compare_versions(current_v, latest_v):
@@ -169,7 +200,9 @@ def check_for_update(app_instance, silent=False):
 
 # =================================================================
 # 3. LÓGICA DE AUTENTICAÇÃO, ID e CREDENCIAIS
+# (Conteúdo da Seção 3 inalterado)
 # =================================================================
+
 # REMOVIDO: A função generate_pilot_numeric_id não é mais usada para o ID do piloto.
 
 def check_login(email: str, password: str) -> bool:
@@ -237,6 +270,7 @@ def delete_credentials(email: str, clear_email: bool = True):
 
 # =================================================================
 # 4. SIMCONNECT, MOCK E LÓGICA DE DADOS
+# (Conteúdo da Seção 4 inalterado)
 # =================================================================
 
 # --- MOCKUP / SIMCONNECT SETUP ---
@@ -523,6 +557,7 @@ class FlightMonitor:
                 time.sleep(0.1) 
 
 class LoginFormFrame(ttk.Frame):
+    # (Conteúdo da LoginFormFrame inalterado)
     # MODIFICADO: A assinatura da função on_success agora recebe o nome (str) em vez do ID (int)
     def __init__(self, master, on_success: Callable[[str, str, str, dict], None], **kwargs):
         super().__init__(master, padding=30, **kwargs)
@@ -581,6 +616,7 @@ class LoginFormFrame(ttk.Frame):
 
 
 class MonitorFrame(ttk.Frame):
+    # (Conteúdo da MonitorFrame inalterado)
     """
     Painel de Monitoramento Detalhado e Dinâmico (Fix para KeyError: 'vs_label').
     """
@@ -690,6 +726,10 @@ class MainApplication(ttk.Window):
         self.current_pilot_email = None 
         self.protocol("WM_DELETE_WINDOW", self._on_app_closing)
         
+        # NOVO: Variáveis para o System Tray
+        self.tray_icon = None
+        self.minimized_to_tray = False
+        
         self.after(1000, self.start_periodic_update_check)
         
         # Tenta Login Automático
@@ -698,6 +738,68 @@ class MainApplication(ttk.Window):
              self._attempt_auto_login(email, password)
         else:
             self._show_login_form()
+
+    # NOVO: Lógica do Ícone de Bandeja
+    def _show_window_from_tray(self, icon, item):
+        """Restaura a janela principal e fecha o ícone da bandeja."""
+        if self.tray_icon:
+            icon.stop()
+            self.tray_icon = None
+        self.after(0, self.deiconify)
+        self.minimized_to_tray = False
+
+    def _on_logoff_from_tray(self, icon, item):
+        """Inicia o processo de logoff a partir do menu do ícone da bandeja."""
+        if self.tray_icon:
+            icon.stop()
+            self.tray_icon = None
+        self.minimized_to_tray = False
+        self.after(0, self._handle_logoff) # Executa o logoff na thread principal do Tkinter
+
+    def _on_quit_from_tray(self, icon, item):
+        """Encerra o aplicativo a partir do menu do ícone da bandeja."""
+        if self.tray_icon:
+            icon.stop()
+            self.tray_icon = None
+        self.minimized_to_tray = False
+        self.after(0, self._on_app_closing) # Executa o encerramento na thread principal do Tkinter
+
+    def _start_tray_icon(self):
+        """Cria e inicia o ícone de bandeja em uma thread separada."""
+        if not PYSTRAY_AVAILABLE or self.tray_icon:
+            return
+
+        # Certifica-se de que a janela está oculta (mas não destruída)
+        # Usamos self.withdraw() aqui. O Tkinter é thread-safe para isso se chamado
+        # a partir de self.after (ou garantimos que a thread do ícone restaure a janela principal)
+        self.withdraw()
+        self.minimized_to_tray = True
+        
+        # Define o menu do ícone da bandeja
+        menu = (
+            pystray.MenuItem('Mostrar Monitor', self._show_window_from_tray, default=True),
+            pystray.MenuItem('Logoff', self._on_logoff_from_tray),
+            pystray.MenuItem('Sair', self._on_quit_from_tray)
+        )
+
+        # Cria o ícone
+        try:
+            icon_image = Image.open(ICON_PATH)
+            self.tray_icon = pystray.Icon(
+                'skymetrics_monitor', 
+                icon_image, 
+                'SkyMetrics Monitor', 
+                menu
+            )
+            # O ícone deve ser rodado em uma thread separada, pois é um loop bloqueante
+            threading.Thread(target=self.tray_icon.run, daemon=True).start()
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] [INFO] Aplicação minimizada para a bandeja.")
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] [ERRO] Falha ao iniciar o ícone da bandeja: {e}")
+            # Se falhar, restaura a janela
+            self.deiconify()
+            self.minimized_to_tray = False
+
 
     def stop_monitor_and_simconnect(self):
         """Encerra o monitor de forma segura e a conexão SimConnect."""
@@ -741,7 +843,11 @@ class MainApplication(ttk.Window):
         if self._update_in_progress:
              self.destroy()
              return
-             
+        
+        # NOVO: Para o ícone da bandeja se estiver rodando
+        if self.tray_icon:
+            self.tray_icon.stop()
+            
         self.stop_monitor_and_simconnect()
         self.destroy()
 
@@ -753,6 +859,11 @@ class MainApplication(ttk.Window):
         self.login_frame = LoginFormFrame(self, on_success=self._on_login_success) 
         self.login_frame.pack(fill=BOTH, expand=YES)
         self.current_frame = self.login_frame
+        
+        # Garante que a janela está visível (em caso de logoff vindo da bandeja)
+        if self.minimized_to_tray:
+            self.deiconify()
+            self.minimized_to_tray = False
 
     # MODIFICADO: numeric_id substituído por display_name
     def _on_login_success(self, email: str, password: str, display_name: str, pilot_data: dict):
@@ -776,9 +887,18 @@ class MainApplication(ttk.Window):
         monitor_frame = MonitorFrame(self, display_name, CONN_STATUS)
         monitor_frame.pack(fill=BOTH, expand=YES)
         self.current_frame = monitor_frame
+        
+        # NOVO: Minimiza para a bandeja após sucesso
+        self.after(500, self._start_tray_icon)
 
     def _handle_logoff(self):
         """Encerra o monitor, apaga a senha e desativa o autologin, mantendo o email."""
+        
+        # NOVO: Para o ícone da bandeja se estiver rodando
+        if self.tray_icon:
+            self.tray_icon.stop()
+            self.tray_icon = None
+            self.minimized_to_tray = False
         
         self.stop_monitor_and_simconnect()
         
@@ -786,6 +906,8 @@ class MainApplication(ttk.Window):
             delete_credentials(self.current_pilot_email, clear_email=False)
             print("-" * 50); print(f"Logoff bem-sucedido. A senha de '{self.current_pilot_email}' foi removida. O email foi mantido para a próxima vez."); print("-" * 50)
 
+        # Garante que a janela está visível antes de mostrar o formulário de login
+        self.deiconify()
         self._show_login_form()
 
 
