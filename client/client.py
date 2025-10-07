@@ -67,7 +67,7 @@ DATA_PRECISION = {
     "total_fuel": 0, "gear_left_pos": 0, "g_force": 1, 
     "engine_count": 0, 
     "lat": 3, "lng": 3, 
-    "eng_combustion": 0, "light_beacon_on": 0, "light_landing_on": 0, "light_strobe_on": 0, "plane_bank_degrees": 1, 
+    "eng_combustion": 0, "light_beacon_on": 0, "light_landing_on": 0, "light_strobe_on": 0, "plane_bank_degrees": 0, 
     "engine_vibration_1": 0,
 }
 

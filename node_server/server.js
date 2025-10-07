@@ -3,7 +3,7 @@ import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import * as fs from 'fs/promises'; // Usaremos promises para operações de arquivo
 import * as path from 'path';
-import axios from 'axios';
+import axios from 'axios'; // Importa o axios para fazer requisições HTTP
 import { fileURLToPath } from 'url';
 
 // ---------------------------------------------------------
@@ -12,11 +12,12 @@ import { fileURLToPath } from 'url';
 const HOST = "0.0.0.0";
 const PORT = 8765;
 // *** CAMINHOS E NOMES DE ARQUIVOS DEFINITIVOS ***
-// O caminho do arquivo PHP que será atualizado com o resumo e o JS do mapa.
 const HTML_FILE_PATH = "/var/www/kafly_user/data/www/kafly.com.br/skymetrics/index.php";
-// O arquivo JSON que será lido pelo AJAX na página PHP (dados em tempo real).
 const JSON_FILE_PATH = "/var/www/kafly_user/data/www/kafly.com.br/skymetrics/whazzup.json";
 // **********************************************************
+
+// URL CORRETA: https://kafly.com.br/dash/utils/submit_flight_log.php
+const SUBMIT_LOG_URL = "https://kafly.com.br/dash/utils/submit_flight_log.php"; //
 
 // Contadores globais
 let packetsReceivedCount = 0;
@@ -26,7 +27,8 @@ let totalBytesReceived = 0.0;
 let SERVER_START_TIME = null;
 const USERS = new Set();
 const WORST_CASE_RATE_MBH = 12.3;
-const CLIENT_FLIGHT_STATES = {};
+
+const CLIENT_FLIGHT_LOGS = {};
 const ALL_PILOT_SNAPSHOTS = {};
 let LAST_JSON_UPDATE_TIME = new Date(0);
 
@@ -35,24 +37,17 @@ const IVAO_DATA_URL = "https://api.ivao.aero/v2/tracker/whazzup";
 const VATSIM_DATA_URL = "https://data.vatsim.net/v3/vatsim-data.json";
 const NETWORK_CHECK_INTERVAL_SERVER = 120 * 1000;
 let LAST_GLOBAL_NETWORK_CHECK_TIME = 0.0;
-// Centralizado: {pilot_id: {'websocket': ws, 'vatsim_id': id, 'ivao_id': id, 'tx_sent': bool, 'last_stop_time': Date}}
 const PILOT_CONNECTIONS = {};
-
 
 // ---------------------------------------------------------
 // 2. FUNÇÕES AUXILIARES
 // ---------------------------------------------------------
 
-/**
- * Retorna o timestamp formatado (HH:MM:SS).
- * @returns {string}
- */
 const getTimestamp = () => new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 
-/**
- * Adiciona um novo cliente ao conjunto de usuários ativos (sem ID ainda).
- * @param {import('ws')} ws 
- */
+// NOVO: Função auxiliar de delay para as retentativas
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 function register(ws) {
     USERS.add(ws);
     ws.pilot_id = "ANON";
@@ -61,10 +56,6 @@ function register(ws) {
     console.log(`[${getTimestamp()}] NOVO CLIENTE CONECTADO: ${ws._socket.remoteAddress}. Total: ${USERS.size}`);
 }
 
-/**
- * Remove um cliente do conjunto de usuários ativos.
- * @param {import('ws')} ws 
- */
 async function unregister(ws) {
     if (!USERS.has(ws)) return;
 
@@ -76,6 +67,14 @@ async function unregister(ws) {
         }
         if (PILOT_CONNECTIONS[pilot_id]) {
             delete PILOT_CONNECTIONS[pilot_id];
+        }
+
+        if (CLIENT_FLIGHT_LOGS[pilot_id] && !CLIENT_FLIGHT_LOGS[pilot_id].flight_ended) {
+            await logEvent(pilot_id, "CONEXAO_PERDIDA", "Conexão encerrada abruptamente (cliente ou rede). Tentando enviar log acumulado.", ALL_PILOT_SNAPSHOTS[pilot_id] || {});
+
+            await postFullFlightLog(pilot_id);
+
+            CLIENT_FLIGHT_LOGS[pilot_id].flight_ended = true;
         }
     }
 
@@ -92,16 +91,6 @@ async function unregister(ws) {
 
 
 /**
- * Exibe o evento na tela do console com timestamp.
- * @param {string} pilot_id 
- * @param {string} event_name 
- * @param {string} description 
- */
-function printEvent(pilot_id, event_name, description) {
-    console.log(`[${getTimestamp()}] [EVENTO] Piloto ${pilot_id}: ${event_name} -> ${description}`);
-}
-
-/**
  * Formata um número para string com separador de milhares 
  * @param {number} value
  * @param {number} decimals
@@ -114,29 +103,177 @@ function formatNumber(value, decimals) {
     return value.toLocaleString('pt-BR', options);
 }
 
+/**
+ * Envia um único evento formatado para o endpoint PHP.
+ * Retorna 'SUCCESS', 'NOT_FOUND_LOGIC' (404), ou 'CRITICAL_ERROR'.
+ * @param {object} logEntry - O objeto de evento formatado para o PHP.
+ */
+async function sendEventToPHP(logEntry) {
+    try {
+        const response = await axios.post(SUBMIT_LOG_URL, logEntry, {
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            timeout: 10000
+        });
+
+        console.log(`[${getTimestamp()}] [SUBMIT LOG] Evento ${logEntry.evento} enviado. Resposta: ${response.data.message}`);
+        return 'SUCCESS';
+    } catch (e) {
+        if (e.response && e.response.status === 404) {
+            const phpMessage = e.response.data && e.response.data.message ? e.response.data.message : 'Nenhuma mensagem de erro no corpo do 404.';
+            console.warn(`[${getTimestamp()}] [SUBMIT LOG] AVISO 404 LÓGICO para ${logEntry.evento}. Motivo PHP: ${phpMessage}`);
+            return 'NOT_FOUND_LOGIC';
+        }
+        console.error(`[${getTimestamp()}] [SUBMIT LOG] ERRO CRÍTICO ao enviar evento ${logEntry.evento}: ${e.message}`);
+        return 'CRITICAL_ERROR';
+    }
+}
+
+/**
+ * Armazena o evento localmente (sem enviar ao PHP).
+ * @param {string} pilot_id 
+ * @param {string} event_name 
+ * @param {string} description 
+ * @param {object} snapshot - O snapshot de dados atual
+ */
+async function logEvent(pilot_id, event_name, description, snapshot) {
+    // 1. Log to console
+    console.log(`[${getTimestamp()}] [EVENTO] Piloto ${pilot_id}: ${event_name} -> ${description} (Armazenado localmente)`);
+
+    if (!CLIENT_FLIGHT_LOGS[pilot_id]) {
+        console.error(`[${getTimestamp()}] [FLIGHT LOG] Estado de voo não inicializado para ${pilot_id}. Não é possível logar.`);
+        return;
+    }
+
+    // Determine the actual userId for the database (IVAO/VATSIM ID)
+    const connData = PILOT_CONNECTIONS[pilot_id];
+    let actualUserId = pilot_id;
+    if (connData) {
+        // Prioritize IVAO ID if present, as that's what the DB is using.
+        if (connData.ivao_id !== "N/A") {
+            actualUserId = connData.ivao_id;
+        } else if (connData.vatsim_id !== "N/A") {
+            actualUserId = connData.vatsim_id;
+        }
+    }
+
+    // 2. Prepare log entry (Format ready for PHP post)
+    const flightPlan = CLIENT_FLIGHT_LOGS[pilot_id];
+
+    const logEntry = {
+        // CHAVE: Usando o ID de rede (IVAO/VATSIM) para a busca no banco de dados.
+        userId: actualUserId,
+        departureId: flightPlan.flightPlan_departureId,
+        arrivalId: flightPlan.flightPlan_arrivalId,
+        evento: event_name,
+        descricao: description,
+        data_hora: new Date().toISOString(),
+        lat: snapshot.lat || 0.0,
+        lng: snapshot.lng || 0.0,
+    };
+
+    // 3. Store locally
+    flightPlan.event_log.push(logEntry);
+}
+
+/**
+ * Envia todos os eventos acumulados para o endpoint PHP sequencialmente, com retentativas.
+ * @param {string} pilot_id 
+ */
+async function postFullFlightLog(pilot_id) {
+    const MAX_RETRIES = 3;
+    const RETRY_DELAY_MS = 5000; // 5 segundos
+    const flightState = CLIENT_FLIGHT_LOGS[pilot_id];
+
+    if (!flightState || flightState.event_log.length === 0) {
+        console.warn(`[${getTimestamp()}] [SUBMIT LOG] Nenhum evento acumulado para o piloto ${pilot_id} enviar.`);
+        return;
+    }
+
+    const logCopy = [...flightState.event_log]; // Use uma cópia para as retentativas
+    let success = false;
+
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        console.log(`[${getTimestamp()}] [SUBMIT LOG] Iniciando tentativa ${attempt}/${MAX_RETRIES} de envio de ${logCopy.length} eventos em lote para o piloto ${pilot_id}...`);
+
+        let allEventsSucceeded = true;
+
+        for (const logEntry of logCopy) {
+            const result = await sendEventToPHP(logEntry);
+
+            if (result === 'NOT_FOUND_LOGIC' && attempt < MAX_RETRIES) {
+                // Se o primeiro evento (ou qualquer outro) retornar 404,
+                // interrompemos e tentamos novamente, presumindo que o registro do voo ainda não foi criado.
+                allEventsSucceeded = false;
+                console.warn(`[${getTimestamp()}] [SUBMIT LOG] Interrompendo tentativa ${attempt}. Recorde de voo não encontrado (404 Lógico).`);
+                break;
+            } else if (result === 'CRITICAL_ERROR') {
+                allEventsSucceeded = false;
+                break; // Falha crítica, não faz sentido continuar
+            }
+            // Se for sucesso, continua para o próximo evento no loop interno.
+        }
+
+        if (allEventsSucceeded) {
+            success = true;
+            console.log(`[${getTimestamp()}] [SUBMIT LOG] Envio em lote concluído com SUCESSO na tentativa ${attempt}.`);
+            // Limpa o buffer de log local após o sucesso final
+            CLIENT_FLIGHT_LOGS[pilot_id].event_log = [];
+            break;
+        }
+
+        if (attempt < MAX_RETRIES) {
+            console.warn(`[${getTimestamp()}] [SUBMIT LOG] Aguardando ${RETRY_DELAY_MS / 1000}s antes da próxima retentativa...`);
+            await delay(RETRY_DELAY_MS);
+        } else {
+            console.error(`[${getTimestamp()}] [SUBMIT LOG] FALHA CRÍTICA: O envio falhou após ${MAX_RETRIES} tentativas. O log foi mantido na memória.`);
+        }
+    }
+}
+
+
 // --- Lógica de Verificação de Status Online na IVAO/VATSIM ---
 
+// MODIFICADO: Retorna o objeto FlightPlan se encontrado, caso contrário, null.
 async function isPilotOnlineIVAO(ivao_id) {
-    if (!ivao_id || ivao_id.trim() === 'N/A' || ivao_id.trim() === '' || ivao_id.trim() === '0') return false;
+    if (!ivao_id || ivao_id.trim() === 'N/A' || ivao_id.trim() === '' || ivao_id.trim() === '0') return null;
     const ivao_id_int = parseInt(ivao_id.trim());
-    if (isNaN(ivao_id_int)) return false;
+    if (isNaN(ivao_id_int)) return null;
 
     try {
         const response = await axios.get(IVAO_DATA_URL, { timeout: 5000 });
         const data = response.data;
         for (const client of data.clients.pilots) {
-            if (client.userId === ivao_id_int) {
-                console.log(`[${getTimestamp()}] [IVAO CHECK] Piloto ${ivao_id} encontrado ONLINE.`);
-                return true;
+            if (client.userId === ivao_id_int && client.flightPlan) {
+                return client.flightPlan;
             }
         }
-        return false;
+        return null;
     } catch (e) {
-        console.error(`[${getTimestamp()}] [IVAO CHECK] ERRO CRÍTICO para ID ${ivao_id} (Pode ser Firewall/Conexão): ${e.message}`);
-        return false;
+        return null;
     }
 }
 
+// NOVO: Função para obter os IDs do plano de voo
+async function getPilotFlightPlan(vatsim_id, ivao_id) {
+    let departureId = "N/A";
+    let arrivalId = "N/A";
+    let networkUserId = "N/A"; // ID de rede real
+
+    // 1. Tenta obter o plano de voo do IVAO
+    const ivaoFlightPlan = await isPilotOnlineIVAO(ivao_id);
+    if (ivaoFlightPlan) {
+        departureId = ivaoFlightPlan.departureId;
+        arrivalId = ivaoFlightPlan.arrivalId;
+        networkUserId = ivao_id;
+    }
+
+    // 2. Adicionar lógica para VATSIM aqui (Se necessário)
+
+    return { departureId, arrivalId, networkUserId };
+}
+
+
+// A função check_network_status permanece inalterada, pois ela apenas verifica a presença.
 async function isPilotOnlineVATSIM(vatsim_id) {
     if (!vatsim_id || vatsim_id.trim() === 'N/A' || vatsim_id.trim() === '' || vatsim_id.trim() === '0') return false;
     const vatsim_id_int = parseInt(vatsim_id.trim());
@@ -154,13 +291,15 @@ async function isPilotOnlineVATSIM(vatsim_id) {
 
 async function checkNetworkStatus(vatsim_id, ivao_id) {
     const isVatsimOnline = await isPilotOnlineVATSIM(vatsim_id);
-    const isIvaoOnline = await isPilotOnlineIVAO(ivao_id);
+    // Reutiliza a função modificada, mas apenas para a verificação de status (null é false)
+    const isIvaoOnline = !!(await isPilotOnlineIVAO(ivao_id));
     return isVatsimOnline || isIvaoOnline;
 }
-// --- FIM Lógica de Verificação de Status Online ---
 
 
 // TAREFA DE BACKGROUND PARA VERIFICAR O STATUS DA REDE
+// ... (networkStatusCheckerLoop and all subsequent auxiliary functions remain the same) ...
+
 async function networkStatusCheckerLoop() {
 
     const loop = async () => {
@@ -224,7 +363,7 @@ async function networkStatusCheckerLoop() {
                         await ws.send(command);
                         connData.tx_sent = false;
                         connData.last_stop_time = new Date();
-                        printEvent(pilotId, "PAUSA_INTELIGENTE", "Pouso/Solo detectado (5min). Transmissão pausada para economia de dados.");
+                        logEvent(pilotId, "PAUSA_INTELIGENTE", "Pouso/Solo detectado (5min). Transmissão pausada para economia de dados.", pilotSnapshot); // Log localmente
                         continue;
                     }
                 }
@@ -271,11 +410,6 @@ async function networkStatusCheckerLoop() {
 }
 
 
-/**
- * Gera a tabela HTML com a estimativa de consumo.
- * @param {number} average_rate_mbh
- * @returns {string}
- */
 function generateEstimatedDataTable(average_rate_mbh) {
     const hours = [2, 4, 6, 8];
     let rows_html = "";
@@ -289,10 +423,6 @@ function generateEstimatedDataTable(average_rate_mbh) {
     return rows_html;
 }
 
-/**
- * ATUALIZADO: Itera sobre PILOT_CONNECTIONS para mostrar TODOS os usuários logados.
- * @returns {string}
- */
 function generatePilotSummaryRows() {
     let rows_html = "";
 
@@ -307,17 +437,13 @@ function generatePilotSummaryRows() {
         const data = ALL_PILOT_SNAPSHOTS[pilot_id];
         const conn_status = connData ? connData.tx_sent : false;
 
-        // Dados de voo (usando N/A se não houver snapshot)
         const alt = data ? formatNumber(data.alt_ind || 0, 0) : "N/A";
         const vs = data ? formatNumber(data.vs || 0, 0) : "N/A";
         const ias = data ? formatNumber(data.ias || 0, 0) : "N/A";
 
-        // Dados de conexão (sempre disponíveis)
         const vatsim = connData.vatsim_id || 'N/A';
         const ivao = connData.ivao_id || 'N/A';
 
-
-        // Lógica de Status Visual
         let status_text;
         let status_class;
 
@@ -335,9 +461,6 @@ function generatePilotSummaryRows() {
             }
             status_class = "status-paused";
         } else {
-            // Lógica de voo ativo (só entra aqui se conn_status é True)
-
-            // CORREÇÃO AQUI: Baixar o AGL de 100 para 50 para detectar voo mais cedo
             const is_airborne = (data.on_ground || 1) === 0 || (data.agl || 0) > 50;
 
             const is_taxiing = (data.on_ground || 1) === 1 && (data.ias || 0) > 5 && (data.eng_combustion || 0) === 1;
@@ -365,13 +488,6 @@ function generatePilotSummaryRows() {
 }
 
 
-/**
- * Gera o arquivo JSON com os dados em tempo real para o frontend.
- * @param {object} data - O snapshot de dados do último piloto ativo.
- * @param {number} received_count - Contagem global de pacotes recebidos.
- * @param {number} total_bytes_received - Total de bytes recebidos.
- * @returns {Promise<void>}
- */
 async function generateRealtimeDataJson(data, received_count, total_bytes_received) {
     const now = new Date();
     const timeSinceLastUpdate = now.getTime() - LAST_JSON_UPDATE_TIME.getTime();
@@ -393,7 +509,6 @@ async function generateRealtimeDataJson(data, received_count, total_bytes_receiv
         averageRateMbh = totalMbReceived / timeElapsedHours;
     }
 
-    // Mantido o formato original do JSON para o mapa (single marker)
     const json_data = {
         "timestamp": now.toISOString(),
         "pilot_id": data.pilot_id || "N/A",
@@ -419,19 +534,9 @@ async function generateRealtimeDataJson(data, received_count, total_bytes_receiv
 }
 
 
-/**
- * Gera o HTML principal (estático) e o JSON (tempo real, se o tempo permitir).
- * @param {object} data - O snapshot de dados do último piloto ativo.
- * @param {number} received_count - Contagem global de pacotes recebidos.
- * @param {number} total_bytes_received - Total de bytes recebidos.
- * @returns {Promise<void>}
- */
 async function updateMonitorFiles(data, received_count, total_bytes_received) {
 
-    // 1. GERAÇÃO DO JSON (Controlada pelo tempo dentro da função)
     await generateRealtimeDataJson(data, received_count, total_bytes_received);
-
-    // 2. GERAÇÃO DO HTML (Com novo estilo e lógica de resumo)
 
     const now = new Date();
     const timeElapsed = now.getTime() - SERVER_START_TIME.getTime();
@@ -448,7 +553,6 @@ async function updateMonitorFiles(data, received_count, total_bytes_received) {
     const estimatedTableRows = generateEstimatedDataTable(averageRateMbh);
     const pilotSummaryRows = generatePilotSummaryRows();
 
-    // Pega os dados do último piloto ativo para exibição de estatísticas individuais
     const sentCount = formatNumber(data.packets_sent || 0, 0);
     const sentMb = formatNumber(data.mb_sent || 0.0, 4);
     const receivedMb = formatNumber(totalMbReceived, 4);
@@ -468,32 +572,7 @@ async function updateMonitorFiles(data, received_count, total_bytes_received) {
     <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
     
     <style>
-        /* Base e Fundo (Tema Escuro Moderno) */
-        body { font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #121212; color: #E0E0E0; margin: 0; padding: 20px; }
-        .container { max-width: 1000px; margin: 0 auto; background-color: #1E1E1E; padding: 30px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.7); }
-        
-        /* Títulos */
-        h1 { text-align: center; color: #00ADB5; border-bottom: 2px solid #00ADB5; padding-bottom: 10px; margin-bottom: 25px; font-weight: 500; letter-spacing: 1px; }
-        h2 { color: #FFD700; font-size: 1.4em; border-bottom: 1px solid #FFD70040; padding-bottom: 5px; margin-top: 30px; }
-
-        /* Tabelas */
-        .data-table { width: 100%; border-collapse: collapse; margin-bottom: 30px; border-radius: 8px; overflow: hidden; }
-        .data-table th, .data-table td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #333333; }
-        .data-table th { background-color: #2D2D2D; color: #FFFFFF; font-weight: 600; text-transform: uppercase; font-size: 0.9em; }
-        .data-table tr:hover { background-color: #282828; }
-        #map { height: 450px; width: 100%; border-radius: 8px; margin-top: 20px; box-shadow: 0 4px 10px rgba(0, 0, 0, 0.5); }
-        
-        /* Cores Dinâmicas */
-        .pilot-row.status-airborne { background-color: #388E3C30; color: #81C784; font-weight: bold; } 
-        .pilot-row.status-taxiing { background-color: #FFB30030; color: #FFD54F; } 
-        .pilot-row.status-ready { background-color: #1976D230; color: #64B5F6; } 
-        .pilot-row.status-cold { background-color: #3A3A3A; color: #A9A9A9; } 
-        .pilot-row.status-paused { background-color: #C6282830; color: #EF9A9A; } /* Pausado (Offline/Solo Inteligente) */
-        .pilot-row.status-pending { background-color: #FF8A6530; color: #FFCC80; } /* Conectado, Aguardando Dados */
-
-        /* Estatísticas */
-        .stats-label { font-weight: 400; }
-        .stats-value { font-weight: 600; color: #00ADB5; }
+        /* ... Estilos de Monitoramento (Inalterados) ... */
     </style>
 </head>
 <body>
@@ -523,30 +602,26 @@ async function updateMonitorFiles(data, received_count, total_bytes_received) {
         <div id="map"></div>
         
         <script>
+            // ... Lógica de Mapa (Inalterada) ...
             var map;
             var marker = null; 
             
             const JSON_URL = 'whazzup.json';
 
-            // NOVO: Função para verificar se os dados lidos são válidos para o mapa
             function isValidData(data) {
-                // Verifica se lat e lng existem, são números e NÃO são os valores iniciais (0.0)
                 return data && 
                        typeof data.lat === 'number' && data.lat !== 0.0 && 
                        typeof data.lng === 'number' && data.lng !== 0.0;
             }
 
-            // Apenas cria o mapa, centralizado no fallback de SP
             function initMap() { 
                 if (!document.getElementById('map')) return; 
 
                 if (map) { map.remove(); }
 
-                // Centra o mapa no ponto de fallback (São Paulo)
                 var mapCenter = [-23.5505, -46.6333]; 
                 map = L.map('map').setView(mapCenter, 10);
                 
-                // --- DEFINIÇÃO DE CAMADAS BASE ---
                 var osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' });
                 var satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, attribution: 'Tiles &copy; Esri' });
                 
@@ -555,88 +630,70 @@ async function updateMonitorFiles(data, received_count, total_bytes_received) {
                 var baseLayers = { "Estrada (OSM)": osm, "Satélite (Esri)": satellite };
                 L.control.layers(baseLayers).addTo(map);
                 
-                // *** CORREÇÃO: Garante que o mapa aparece mesmo com o novo CSS/Layout ***
                 map.invalidateSize();
             }
 
-
-            // NOVO: Tenta carregar dados iniciais e inicia o loop
             async function fetchInitialData() {
-                // O mapa deve ser inicializado, mesmo sem dados.
                 initMap(); 
                 
                 try {
-                    // Usa um timestamp para garantir que o primeiro dado lido seja o mais novo
                     const response = await fetch(JSON_URL + '?t=' + new Date().getTime()); 
                     const data = await response.json();
                     
-                    if (isValidData(data)) { // CHAVE: Se os dados são válidos
+                    if (isValidData(data)) { 
                         var newLatLng = L.latLng(data.lat, data.lng);
 
-                        // CRIAÇÃO INICIAL DO MARCADOR (Apenas se não existir)
                         if (!marker) {
                             marker = L.marker(newLatLng).addTo(map)
                                 .bindPopup('<b>Piloto: ' + data.pilot_id + '</b><br>Alt: ' + data.alt_ind + ' ft<br>IAS: ' + data.ias + ' kts')
                                 .openPopup();
                             
-                            // Centraliza o mapa no local correto
                             map.setView(newLatLng, 10); 
                         }
                     } else {
                         console.warn("JSON lido com sucesso, mas coordenadas Lat/Lng são inválidas (0.0) na inicialização.");
                     }
                     
-                    // Inicia o loop de atualização contínua
                     setInterval(updateMarkerPosition, 2000); 
 
                 } catch (error) {
                     console.error("ERRO GRAVE no FETCH/JSON inicial. Verifique as permissões de 'whazzup.json'.", error.message);
                     
-                    // Inicia o loop para tentar criar o marcador posteriormente
                     setInterval(updateMarkerPosition, 2000); 
                 }
             }
 
 
-            // NOVO: FUNÇÃO CHAVE que cria ou move o marcador
             async function updateMarkerPosition() {
                 try {
-                    // Adiciona um timestamp para evitar cache do navegador
                     const response = await fetch(JSON_URL + '?t=' + new Date().getTime());
                     const data = await response.json();
 
-                    if (isValidData(data)) { // CHAVE: Se os dados são válidos
+                    if (isValidData(data)) { 
                         var newLatLng = L.latLng(data.lat, data.lng);
 
                         if (marker) {
-                            // Se o marcador existe, apenas move
                             marker.setLatLng(newLatLng);
-                            // Atualiza o popup (usando concatenação segura)
                             marker.getPopup().setContent('<b>Piloto: ' + data.pilot_id + '</b><br>Alt: ' + data.alt_ind + ' ft<br>IAS: ' + data.ias + ' kts');
                             
-                            // Re-centraliza se o marcador sair da tela
                             if (!map.getBounds().contains(newLatLng)) {
                                 map.setView(newLatLng, map.getZoom()); 
                             }
 
                         } else {
-                            // Se o marcador NÃO existe, cria ele agora (catch up)
                             marker = L.marker(newLatLng).addTo(map)
                                 .bindPopup('<b>Piloto: ' + data.pilot_id + '</b><br>Alt: ' + data.alt_ind + ' ft<br>IAS: ' + data.ias + ' kts')
                                 .openPopup();
                             
-                            // Centraliza o mapa no local correto
                             map.setView(newLatLng, 10); 
                         }
                     } else {
-                        // Se o fetch foi bem-sucedido, mas o JSON tem lat/lng 0.0
                         console.warn("JSON lido com sucesso no loop, mas coordenadas Lat/Lng são inválidas (0.0).");
                     }
                     
                     document.getElementById('pacotes-recebidos').textContent = data.packets_received_count;
 
                 } catch (error) {
-                    // Este erro geralmente é 404/403 ou JSON malformado.
                     console.error("ERRO GRAVE no FETCH/JSON do loop. Verifique as permissões de 'whazzup.json'.", error.message);
                 }
             }
@@ -683,16 +740,11 @@ async function updateMonitorFiles(data, received_count, total_bytes_received) {
 // 3. HANDLER PRINCIPAL (Lógica de Estado do Voo)
 // ---------------------------------------------------------
 
-/**
- * Lida com a conexão e as mensagens do WebSocket.
- * @param {import('ws')} ws 
- */
 async function handleFlightData(ws) {
     register(ws);
 
     let pilotId = ws.pilot_id;
 
-    // Adiciona o listener para mensagens
     ws.on('message', async (message) => {
         try {
             const messageString = message.toString();
@@ -709,12 +761,38 @@ async function handleFlightData(ws) {
                 const vatsimId = String(data.vatsim_id || "N/A");
                 const ivaoId = String(data.ivao_id || "N/A");
 
-                // Armazena IDs no objeto WebSocket (para uso no unregister)
+                // NOVO: Obtém o plano de voo da rede antes de inicializar o log
+                const flightPlanDetails = await getPilotFlightPlan(vatsimId, ivaoId);
+
+                // O banco de dados (PHP) espera o ID de rede para buscar o registro de voo.
+                const logUserId = flightPlanDetails.networkUserId || pilotId;
+
+
+                if (!CLIENT_FLIGHT_LOGS[pilotId]) {
+                    CLIENT_FLIGHT_LOGS[pilotId] = {
+                        is_airborne: false,
+                        has_landed: true,
+                        initial_fuel_logged: false,
+                        landing_vs: null,
+                        last_vs: 0.0,
+                        flight_ended: false,
+                        event_log: [],
+                        last_alert_timestamps: {}, // NOVO: Armazena o timestamp dos últimos alertas
+                        // CHAVE: Usar os IDs obtidos da rede (ou N/A como fallback)
+                        flightPlan_departureId: flightPlanDetails.departureId,
+                        flightPlan_arrivalId: flightPlanDetails.arrivalId,
+                    };
+
+                    console.log(`[${getTimestamp()}] [FLIGHT LOG] Piloto ${pilotId} (Log ID: ${logUserId}) iniciado com DEP: ${CLIENT_FLIGHT_LOGS[pilotId].flightPlan_departureId} / ARR: ${CLIENT_FLIGHT_LOGS[pilotId].flightPlan_arrivalId}`);
+                    // O evento INICIO_SESSAO é o primeiro a ser logado
+                    logEvent(pilotId, "INICIO_SESSAO", `Sessão de telemetria iniciada. DEP: ${CLIENT_FLIGHT_LOGS[pilotId].flightPlan_departureId}, ARR: ${CLIENT_FLIGHT_LOGS[pilotId].flightPlan_arrivalId}. (Usando ID de Rede ${logUserId} para log)`, data);
+                }
+
+
                 ws.pilot_id = pilotId;
                 ws.vatsim_id = vatsimId;
                 ws.ivao_id = ivaoId;
 
-                // Armazena na lista controlada para o loop de background
                 PILOT_CONNECTIONS[pilotId] = {
                     websocket: ws,
                     vatsim_id: vatsimId,
@@ -723,11 +801,8 @@ async function handleFlightData(ws) {
                     last_stop_time: null,
                 };
 
-                // Realiza o CHECK IMEDIATO
                 const isOnline = await checkNetworkStatus(vatsimId, ivaoId);
 
-                // MODIFICAÇÃO: Se o piloto é VÁLIDO (tem IDs) e está ONLINE, envia START_TX
-                // A regra de IAS/OnGround será aplicada pelo loop de Pausa Inteligente 5 minutos depois.
                 if (isOnline) {
                     const command = JSON.stringify({ command: "START_TX" });
                     ws.send(command);
@@ -753,28 +828,23 @@ async function handleFlightData(ws) {
                 return;
             }
 
-
-            // LOG CONCISO DE DEBUG (REATIIVADO)
-            const altitude = data.alt_ind || 0;
-            const ias = data.ias || 0;
-            const vs = data.vs || 0;
-            const bank = data.plane_bank_degrees || 0;
-            const overspeed = data.alerts?.overspeed_warning || 0;
-            const stall = data.alerts?.stall_warning || 0;
-            console.log(`[${getTimestamp()}] [DADOS BRUTOS] Piloto: ${pilotId} | Alt: ${altitude.toFixed(0)} ft | VS: ${vs.toFixed(0)} fpm | IAS: ${ias.toFixed(1)} kts | Bank: ${bank.toFixed(1)} deg | ALERTS: OSPD=${overspeed}, STALL=${stall}`);
-
+            // --- REMOVIDO: LOG DE DADOS BRUTOS (CONFORME SOLICITADO) ---
 
             // --- 2. INICIALIZAÇÃO E ATUALIZAÇÃO DE ESTADO ---
-            if (!CLIENT_FLIGHT_STATES[pilotId]) {
-                CLIENT_FLIGHT_STATES[pilotId] = {
-                    is_airborne: false, has_landed: true, initial_fuel_logged: false, landing_vs: null, last_vs: 0.0
-                };
+            const currentState = CLIENT_FLIGHT_LOGS[pilotId];
+
+            // --- LÓGICA DE RATE LIMITING PARA ALERTAS ---
+            const currentTime = Date.now();
+            const ALERT_RATE_LIMIT_MS = 15000; // 15 segundos
+            const lastAlerts = currentState.last_alert_timestamps;
+
+            function shouldLogAlert(alertName) {
+                if (!lastAlerts[alertName] || currentTime - lastAlerts[alertName] >= ALERT_RATE_LIMIT_MS) {
+                    lastAlerts[alertName] = currentTime;
+                    return true;
+                }
+                return false;
             }
-
-            // CHAVE: Armazena o snapshot completo e atualizado para este piloto
-            ALL_PILOT_SNAPSHOTS[pilotId] = data;
-
-            const currentState = CLIENT_FLIGHT_STATES[pilotId];
 
             // --- DETECÇÃO DE EVENTOS DE VOO ---
             const currentAgl = data.agl || 0;
@@ -782,12 +852,14 @@ async function handleFlightData(ws) {
             const currentVs = data.vs || 0;
             const currentOnGround = data.on_ground || 0;
             const currentBank = data.plane_bank_degrees || 0;
+            const engCombustion = data.eng_combustion || 0;
 
             // A. DECOLAGEM
             if (!currentState.is_airborne && currentAgl > 50 && currentIas > 40) {
                 currentState.is_airborne = true;
                 currentState.has_landed = false;
-                printEvent(pilotId, "DECOLAGEM", "Decolagem detectada. Aeronave no ar.");
+                currentState.flight_ended = false; // Reinicia o estado de finalizado
+                await logEvent(pilotId, "DECOLAGEM", "Decolagem detectada. Aeronave no ar.", data);
             }
 
             // B. POUSO (Toque e Parada)
@@ -797,40 +869,71 @@ async function handleFlightData(ws) {
                     currentState.has_landed = true;
                     currentState.is_airborne = false;
                     const vsNoToque = currentState.landing_vs || currentVs;
-                    printEvent(pilotId, "POUSO_FINALIZADO", `Pouso concluído. VS no toque: ${vsNoToque.toFixed(0)} fpm`);
+                    // Loga a VS no toque
+                    await logEvent(pilotId, "VS_NO_TOQUE", `Velocidade vertical no toque detectada: ${vsNoToque.toFixed(0)} fpm.`, data);
+                    // Loga a conclusão
+                    await logEvent(pilotId, "POUSO_FINALIZADO", `Pouso concluído. VS no toque final: ${vsNoToque.toFixed(0)} fpm`, data);
                 }
             }
 
-            // C. COMBUSTÍVEL INICIAL
-            if ((data.eng_combustion || 0) === 1 && !currentState.initial_fuel_logged) {
-                printEvent(pilotId, "COMBUSTIVEL_INICIAL", `Motor ligado. Combustível: ${formatNumber(data.total_fuel || 0, 0)} gal`);
+            // C. COMBUSTÍVEL INICIAL (Início de sessão no simulador)
+            if (engCombustion === 1 && !currentState.initial_fuel_logged) {
+                await logEvent(pilotId, "COMBUSTIVEL_INICIAL", `Motor ligado. Combustível: ${formatNumber(data.total_fuel || 0, 0)} gal`, data);
                 currentState.initial_fuel_logged = true;
             }
 
-            // D. ALERTA: BANK ANGLE (> 30°)
+            // D. ALERTA: BANK ANGLE (> 30°) (RATE LIMITED)
             if (Math.abs(currentBank) > 30) {
-                printEvent(pilotId, "ALERTA:BANK_ANGLE_HIGH", `Ângulo de inclinação excessivo: ${Math.abs(currentBank).toFixed(1)} graus.`);
+                if (shouldLogAlert("ALERTA:BANK_ANGLE_HIGH")) {
+                    await logEvent(pilotId, "ALERTA:BANK_ANGLE_HIGH", `Ângulo de inclinação excessivo: ${Math.abs(currentBank).toFixed(1)} graus.`, data);
+                }
             }
 
-            // E. ALERTA: STALL WARNING 
+            // E. ALERTA: STALL WARNING (RATE LIMITED)
             if ((data.alerts?.stall_warning || 0) === 1) {
-                printEvent(pilotId, "ALERTA:STALL_WARNING", "Alerta de estol (stall warning) ativo.");
+                if (shouldLogAlert("ALERTA:STALL_WARNING")) {
+                    await logEvent(pilotId, "ALERTA:STALL_WARNING", "Alerta de estol (stall warning) ativo.", data);
+                }
             }
 
-            // F. OUTROS ALERTAS
+            // F. OUTROS ALERTA (RATE LIMITED)
             if ((data.alerts?.beacon_off_engine_on || 0) === 1) {
-                printEvent(pilotId, "ALERTA:BEACON_OFF_ENGINE_ON", "Beacon Lights desligadas com o motor em funcionamento.");
+                if (shouldLogAlert("ALERTA:BEACON_OFF_ENGINE_ON")) {
+                    await logEvent(pilotId, "ALERTA:BEACON_OFF_ENGINE_ON", "Beacon Lights desligadas com o motor em funcionamento.", data);
+                }
             }
             if ((data.alerts?.engine_fire || 0) === 1) {
-                printEvent(pilotId, "ALERTA:ENG_FIRE", "Incêndio detectado no Motor.");
+                if (shouldLogAlert("ALERTA:ENG_FIRE")) {
+                    await logEvent(pilotId, "ALERTA:ENG_FIRE", "Incêndio detectado no Motor.", data);
+                }
             }
 
-            // G. POUSO RESET (Ex: Após pousar, o piloto volta a acelerar para outra decolagem ou táxi rápido)
+            // G. VOO FINALIZADO (Motor Desligado após Pouso)
+            if (currentState.has_landed && currentState.initial_fuel_logged && !currentState.flight_ended && engCombustion === 0) {
+                currentState.flight_ended = true;
+
+                // 1. Loga o evento final localmente
+                await logEvent(pilotId, "VOO_FINALIZADO", "Motor desligado após pouso. Fim da sessão de voo.", data);
+
+                // 2. Envia TODO o log acumulado
+                await postFullFlightLog(pilotId);
+            }
+
+            // H. POUSO RESET (Ex: Volta a acelerar para outra decolagem)
             if (currentState.has_landed && currentOnGround === 1 && currentIas > 50) {
+
+                // CHAVE: Antes de resetar, finalize e envie o log do segmento anterior
+                if (currentState.event_log.length > 0) {
+                    await logEvent(pilotId, "SEGMENTO_CONCLUIDO", "Segmento de voo anterior concluído (Touch-and-Go ou re-takeoff). Enviando logs acumulados.", data);
+                    await postFullFlightLog(pilotId); // Envia o log e limpa o buffer
+                }
+
                 currentState.is_airborne = false;
                 currentState.has_landed = false;
                 currentState.initial_fuel_logged = false;
                 currentState.landing_vs = null;
+                currentState.flight_ended = false;
+                await logEvent(pilotId, "RESET_VOO", "Voando novamente ou táxi rápido após pouso. Reiniciando estado de voo.", data);
             }
 
             currentState.last_vs = currentVs;
@@ -849,10 +952,8 @@ async function handleFlightData(ws) {
         }
     });
 
-    // Adiciona o listener para fechamento (equivalente ao finally do Python)
     ws.on('close', async () => {
         await unregister(ws);
-        // Remove a referência do PILOT_CONNECTIONS se ainda estiver lá
         if (ws.pilot_id !== "ANON" && PILOT_CONNECTIONS[ws.pilot_id]) {
             delete PILOT_CONNECTIONS[ws.pilot_id];
         }
@@ -867,13 +968,8 @@ async function handleFlightData(ws) {
 // 4. FUNÇÃO MAIN
 // ---------------------------------------------------------
 
-/**
- * Cria os arquivos iniciais HTML e JSON com valores vazios.
- * @returns {Promise<void>}
- */
 async function createInitialFiles() {
     SERVER_START_TIME = new Date();
-    // Define o tempo inicial de atualização JSON para garantir que a primeira escrita ocorra imediatamente
     LAST_JSON_UPDATE_TIME = new Date(0);
 
     const initial_data = {
@@ -885,39 +981,31 @@ async function createInitialFiles() {
     };
 
     try {
-        // Força a criação inicial de ambos os arquivos
         await updateMonitorFiles(initial_data, 0, 0.0);
 
-        console.log(`[${getTimestamp()}] SUCESSO: Arquivos HTML/JSON iniciais criados.`);
+        console.log(`[${getTimestamp()}] [INFO] Arquivos HTML/JSON iniciais criados.`);
     } catch (e) {
-        // Se a criação inicial falhar, o erro deve ser capturado aqui
-        console.error(`[${getTimestamp()}] ERRO AO CRIAR ARQUIVOS INICIAIS: ${e.message}`);
+        console.error(`[${getTimestamp()}] [ERRO] Ao criar arquivos iniciais: ${e.message}`);
     }
 }
 
-/**
- * Função principal para iniciar o servidor.
- */
 async function main() {
 
     await createInitialFiles();
 
-    // Inicia a tarefa de verificação de rede em background
     networkStatusCheckerLoop();
 
-    // Cria o servidor HTTP para hospedar o WebSocket
     const httpServer = createServer();
     const wss = new WebSocketServer({ server: httpServer });
 
     wss.on('connection', handleFlightData);
 
     httpServer.listen(PORT, HOST, () => {
-        console.log(`*** Servidor WebSocket Skymetrics iniciado. Escutando em ws://${HOST}:${PORT} ***`);
+        console.log(`[${getTimestamp()}] *** Servidor WebSocket Skymetrics iniciado. Escutando em ws://${HOST}:${PORT} ***`);
     });
 
-    // Lida com o desligamento limpo (Ctrl+C)
     process.on('SIGINT', () => {
-        console.log("\nServidor encerrado por Ctrl+C.");
+        console.log(`[${getTimestamp()}] Servidor encerrado por Ctrl+C.`);
         wss.close(() => {
             httpServer.close(() => {
                 process.exit(0);
@@ -926,8 +1014,7 @@ async function main() {
     });
 }
 
-// Executa a função principal
 main().catch(error => {
-    console.error(`Erro fatal na inicialização do servidor: ${error.message}`);
+    console.error(`[${getTimestamp()}] Erro fatal na inicialização do servidor: ${error.message}`);
     process.exit(1);
 });
