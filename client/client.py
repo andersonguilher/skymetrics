@@ -42,7 +42,7 @@ CLIENT_CONFIG_SECTION = 'CLIENT_CONFIG'
 CLIENT_LOGIN_SECTION = 'LOGIN_CREDENTIALS'
 
 # NOVO: VERSÃO ATUAL E LÓGICA DE ATUALIZAÇÃO
-CURRENT_VERSION = "1.0.0" 
+CURRENT_VERSION = "1.0.2" 
 UPDATE_CHECK_URL = "https://kafly.com.br/skymetrics/update/current_version.txt"
 UPDATE_EXECUTABLE_NAME = "updater.exe" 
 UPDATE_CHECK_LOCK = Lock()
@@ -564,7 +564,11 @@ class LoginFormFrame(ttk.Frame):
         self.email_var = ttk.StringVar(); self.password_var = ttk.StringVar(); self.remember_var = ttk.BooleanVar(value=False) 
         
         # --- Layout da GUI ---
-        ttk.Label(self, text=f"Login: {VA_KEY}", font=("TkDefaultFont", 18, "bold")).pack(pady=20)
+        ttk.Label(self, text=f"Login: {VA_KEY}", font=("TkDefaultFont", 18, "bold")).pack(pady=(20, 5)) # Padding ajustado
+        
+        # NOVO: Adiciona a label da Versão
+        ttk.Label(self, text=f"Versão: {CURRENT_VERSION}", font=("TkDefaultFont", 10)).pack(pady=(0, 15))
+        
         form_frame = ttk.Frame(self); form_frame.pack(pady=10, fill='x'); form_frame.columnconfigure(0, weight=1); form_frame.columnconfigure(1, weight=1);
         ttk.Label(form_frame, text="E-mail ou Username:", anchor='w').grid(row=0, column=0, columnspan=2, pady=(10, 0), padx=5, sticky='w')
         ttk.Entry(form_frame, textvariable=self.email_var, width=40).grid(row=1, column=0, columnspan=2, pady=5, ipady=3, padx=5, sticky='ew')
@@ -612,7 +616,6 @@ class LoginFormFrame(ttk.Frame):
         # MODIFICADO: Usa o nome de exibição em vez do ID numérico
         self.master.after(0, lambda: self.status_label.config(text=f"Piloto Validado! Nome: {display_name}", bootstyle="success"))
         self.master.after(1000, lambda: self.on_success(email, password, display_name, pilot_data))
-
 
 class MonitorFrame(ttk.Frame):
     # (Conteúdo da MonitorFrame inalterado)
