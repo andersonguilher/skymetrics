@@ -6,6 +6,13 @@ import * as path from 'path';
 import axios from 'axios';
 import { fileURLToPath } from 'url';
 import https from 'https'; // Import necessário para Axios com SSL
+// NOVO: Adiciona módulos para executar comandos shell
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+// Promisifica exec para uso com await
+const execPromise = promisify(exec);
+
 
 // ---------------------------------------------------------
 // 1. CONFIGURAÇÃO GERAL
@@ -133,26 +140,61 @@ function formatNumber(value, decimals) {
 }
 
 /**
- * Envia um único evento formatado para o endpoint PHP.
+ * Envia um único evento formatado para o endpoint PHP, usando CURL.
  * @param {object} logEntry - O objeto de evento formatado para o PHP.
  */
 async function sendEventToPHP(logEntry) {
-    try {
-        const response = await axios.post(SUBMIT_LOG_URL, logEntry, {
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            timeout: 10000,
-            httpsAgent: agent // Usa o agente que ignora o erro SSL
-        });
 
-        console.log(`[${getTimestamp()}] [SUBMIT LOG] Evento ${logEntry.event} enviado. Resposta: ${response.data.message}`);
-        return 'SUCCESS';
-    } catch (e) {
-        if (e.response && e.response.status === 400) {
-            const phpMessage = e.response.data && e.response.data.message ? e.response.data.message : 'Nenhuma mensagem de erro no corpo do 400.';
-            console.error(`[${getTimestamp()}] [SUBMIT LOG] ERRO CRÍTICO ao enviar evento ${logEntry.event || 'undefined'}: Request failed with status code 400. Motivo PHP: ${phpMessage}`);
+    // Constrói a string de dados no formato --data-urlencode para o curl
+    let curlData = '';
+
+    // Converte o objeto logEntry em uma string de parâmetros URL-encoded para o curl
+    for (const [key, value] of Object.entries(logEntry)) {
+        // Usa encodeURIComponent para garantir que o valor seja seguro no URL e no shell
+        // Valor deve ser String (já tratado em logEvent)
+        const encodedValue = encodeURIComponent(String(value));
+        // Adiciona aspas simples para proteger o valor no shell
+        curlData += ` --data-urlencode "${key}=${encodedValue}"`;
+    }
+
+    // Constrói o comando curl completo
+    // -k: Inseguro, para ignorar a verificação de SSL (como no teste do usuário)
+    // -s: Silencioso, para não mostrar a barra de progresso do curl
+    const command = `curl -X POST -k -s "${SUBMIT_LOG_URL}" -H "Content-Type: application/x-www-form-urlencoded"${curlData}`;
+
+    try {
+        const { stdout, stderr } = await execPromise(command);
+
+        // A resposta do PHP (stdout) é o JSON.
+        let responseJson = null;
+        const rawResponse = stdout.trim();
+
+        try {
+            responseJson = JSON.parse(rawResponse);
+        } catch (e) {
+            // Se falhar o JSON parse, assume que é um erro PHP que não retornou JSON válido
+            console.error(`[${getTimestamp()}] [SUBMIT LOG] ERRO CRÍTICO (CURL STDOUT) ao enviar evento ${logEntry.evento || 'undefined'}. Resposta bruta: ${rawResponse.substring(0, 100)}`);
             return 'CRITICAL_ERROR';
         }
-        console.error(`[${getTimestamp()}] [SUBMIT LOG] ERRO CRÍTICO ao enviar evento ${logEntry.event || 'undefined'}: ${e.message}`);
+
+        if (stderr) {
+            console.warn(`[${getTimestamp()}] [SUBMIT LOG] Aviso/Erro de CURL (STDERR): ${stderr.trim()}`);
+        }
+
+        console.log(`[${getTimestamp()}] [SUBMIT LOG] Evento ${logEntry.evento} enviado. Resposta: ${responseJson.message}`);
+
+        // Verifica o status do JSON retornado
+        if (responseJson.status === 'error' || responseJson.status === 'not_found') {
+            // O PHP retornou 400 ou 404 (lógico), o que é tratado como erro para o retry loop
+            console.error(`[${getTimestamp()}] [SUBMIT LOG] ERRO LÓGICO do PHP: ${responseJson.message}`);
+            return 'CRITICAL_ERROR';
+        }
+
+        return 'SUCCESS';
+
+    } catch (e) {
+        // Captura erros de execução do curl (comando não encontrado, falha de rede)
+        console.error(`[${getTimestamp()}] [SUBMIT LOG] ERRO CRÍTICO ao executar CURL: ${e.message}`);
         return 'CRITICAL_ERROR';
     }
 }
@@ -173,23 +215,26 @@ async function logEvent(pilot_name, event_name, description, snapshot) {
         return;
     }
 
-    // Determine the actual userId for the database (IVAO/VATSIM ID)
-    const connData = PILOT_CONNECTIONS[pilot_name];
-    let actualUserId = snapshot.pilot_id || "N/A";
-    if (connData) {
-        if (connData.ivao_id !== "N/A") {
-            actualUserId = connData.ivao_id;
-        } else if (connData.vatsim_id !== "N/A") {
-            actualUserId = connData.vatsim_id;
-        }
+    const flightPlan = CLIENT_FLIGHT_LOGS[pilot_name];
+
+    // ** CORREÇÃO: Usa o logUserId validado e salvo durante o handshake **
+    let actualUserId = flightPlan.logUserId;
+    if (!actualUserId || actualUserId === 'N/A') {
+        console.error(`[${getTimestamp()}] [CRITICAL] logUserId não encontrado na estrutura CLIENT_FLIGHT_LOGS para ${pilot_name}.`);
+        actualUserId = 'N/A'; // Garante que N/A seja enviado se algo falhou catastroficamente
     }
+    // *************************************************************************
 
     // 2. Prepare log entry (Formato limpo para o PHP)
-    const flightPlan = CLIENT_FLIGHT_LOGS[pilot_name];
+
 
     // --- Valores Seguros ---
     // Garante que o combustível seja sempre um número para logs.
     const safeTotalFuel = snapshot.total_fuel || 0.0;
+
+    // COERÇÃO CRÍTICA: Coerção explícita de Lat/Lng para String (necessário para a lógica do PHP)
+    const latString = String(snapshot.lat || 0.0);
+    const lngString = String(snapshot.lng || 0.0);
 
     const logEntry = {
         // Campos obrigatórios para o PHP (busca)
@@ -200,8 +245,8 @@ async function logEvent(pilot_name, event_name, description, snapshot) {
         // CHAVE: Campos Limpos para o Log JSON
         data_hora: new Date().toISOString(), // Mapeado como data_hora no PHP
         evento: event_name,                 // Mapeado como evento no PHP
-        lat: snapshot.lat || 0.0,
-        lng: snapshot.lng || 0.0,
+        lat: latString,                     // Passando como String
+        lng: lngString,                     // Passando como String
         descricao: description, // Mantém a descrição por padrão
     };
 
@@ -886,7 +931,7 @@ async function updateMonitorFiles(data, received_count, total_bytes_received) {
             <tbody>
                 <tr class="stats-row"><td class="stats-label">Pacotes Enviados (Cliente)</td><td class="stats-value">${sentCount}</td></tr>
                 <tr class="stats-row"><td class="stats-label">Dados Enviados (MB)</td><td class="stats-value">${sentMb} MB</td></tr>
-                <tr class="stats-row"><td class="stats-label">Pacotes Recebidos (Servidor)</td><td class="stats-value" id="pacotes-recebidos">${received_count}</td></tr>
+                <tr class="stats-row"><td class="stats-label">Pacotes Recebidos (Servidor)</td><td class="stats-value">${received_count}</td></tr>
                 <tr class="stats-row"><td class="stats-label">Dados Recebidos (MB)</td><td class="stats-value">${receivedMb} MB</td></tr>
             </tbody>
         </table>
@@ -943,22 +988,30 @@ async function handleFlightData(ws) {
                 const vatsimId = String(data.vatsim_id || "N/A");
                 const ivaoId = String(data.ivao_id || "N/A");
 
-                // LOG DE DIAGNÓSTICO: Qual ID está sendo verificado na conexão
-                console.log(`[${getTimestamp()}] [INITIAL CHECK] Verificando Piloto: ${pilotName} (V: ${vatsimId} / I: ${ivaoId})`);
+                // --- NOVO: TENTA OBTER DEP/ARR DIRETAMENTE DO CLIENTE (PARA SIMULAÇÃO) ---
+                let depId = String(data.departureId || "N/A").trim().toUpperCase();
+                let arrId = String(data.arrivalId || "N/A").trim().toUpperCase();
+                let logUserId = vatsimId !== "N/A" ? vatsimId : ivaoId; // Default logUserId
 
-                // NOVO: Obtém o plano de voo da rede antes de inicializar o log
-                const flightPlanDetails = await getPilotFlightPlan(vatsimId, ivaoId);
+                let networkCheckRequired = true;
+                if (depId !== "N/A" && arrId !== "N/A") {
+                    console.log(`[${getTimestamp()}] [INITIAL CHECK] DEP/ARR recebidos do cliente. Pulando lookup de rede.`);
+                    networkCheckRequired = false;
+                }
+                // --------------------------------------------------------------------------
 
-                // -----------------------------------------------------------
-                // 🟢 CORREÇÃO CRÍTICA: GARANTIR CAIXA ALTA (UPPERCASE) E TRIM
-                // -----------------------------------------------------------
-                const depId = flightPlanDetails.departureId ? String(flightPlanDetails.departureId).trim().toUpperCase() : "N/A";
-                const arrId = flightPlanDetails.arrivalId ? String(flightPlanDetails.arrivalId).trim().toUpperCase() : "N/A";
-                // -----------------------------------------------------------
+                if (networkCheckRequired) {
+                    // LOG DE DIAGNÓSTICO: Qual ID está sendo verificado
+                    console.log(`[${getTimestamp()}] [INITIAL CHECK] Verificando Piloto: ${pilotName} (V: ${vatsimId} / I: ${ivaoId})`);
 
-                // O banco de dados (PHP) espera o ID de rede para buscar o registro de voo.
-                const logUserId = flightPlanDetails.networkUserId || data.pilot_id || "N/A"; // Usa ID de rede ou fallback do cliente
+                    // Obtém o plano de voo da rede
+                    const flightPlanDetails = await getPilotFlightPlan(vatsimId, ivaoId);
 
+                    // Atualiza IDs se o lookup de rede for bem-sucedido
+                    depId = flightPlanDetails.departureId ? String(flightPlanDetails.departureId).trim().toUpperCase() : depId;
+                    arrId = flightPlanDetails.arrivalId ? String(flightPlanDetails.arrivalId).trim().toUpperCase() : arrId;
+                    logUserId = flightPlanDetails.networkUserId || logUserId;
+                }
 
                 if (!CLIENT_FLIGHT_LOGS[pilotId]) { // Keyed by Name
                     CLIENT_FLIGHT_LOGS[pilotId] = {
@@ -973,6 +1026,8 @@ async function handleFlightData(ws) {
                         // CHAVE: Usar os IDs normalizados (corrigidos)
                         flightPlan_departureId: depId,
                         flightPlan_arrivalId: arrId,
+                        // NOVO: Armazenar o UserID de Busca para o log final
+                        logUserId: logUserId,
                     };
 
                     console.log(`[${getTimestamp()}] [FLIGHT LOG] Piloto ${pilotId} (Log ID: ${logUserId}) iniciado com DEP: ${CLIENT_FLIGHT_LOGS[pilotId].flightPlan_departureId} / ARR: ${CLIENT_FLIGHT_LOGS[pilotId].flightPlan_arrivalId}`);
