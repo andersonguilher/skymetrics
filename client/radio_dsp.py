@@ -6,15 +6,15 @@ import pyaudio
 
 # --- Constantes do Rádio de Aviação ---
 # Frequências típicas de voz de rádio: 300 Hz a 3000 Hz (banda estreita)
-LOW_CUT = 300
-HIGH_CUT = 3000
+LOW_CUT = 200
+HIGH_CUT = 3700
 
 # Amplitude do ruído branco. Ajuste este valor (0.005 a 0.05)
 # para controlar a intensidade do chiado de fundo.
-NOISE_LEVEL = 0.015 
+NOISE_LEVEL = 0.003 
 
 # Fator de escala para clipping/distorção (compressão AM). Valores menores distorcem mais.
-CLIPPING_FACTOR = 0.92 
+CLIPPING_FACTOR = 0.03
 
 # REVERTIDO: BASE_GAIN é o novo OUTPUT_GAIN fixo.
 OUTPUT_GAIN = 8.0 
@@ -148,6 +148,31 @@ def add_static_noise_only(audio_data, sample_rate):
     # APLICAÇÃO DO GANHO
     audio_rescaled = audio_clipped * OUTPUT_GAIN * MAX_INT_16
     
+    audio_final = np.clip(audio_rescaled, np.iinfo(np.int16).min, np.iinfo(np.int16).max).astype(np.int16)
+    
+    return audio_final.tobytes()
+
+def generate_squelch_tail_burst(chunk_size: int, sample_rate: int) -> bytes:
+    """
+    Gera um burst de ruído estático filtrado para o 'squelch tail' de rádio.
+    """
+    # 1. Cria uma base de silêncio para simular o buffer
+    audio_norm = np.zeros(chunk_size, dtype=np.float32)
+    
+    # 2. GERAÇÃO E FILTRAGEM DO RUÍDO (Ruído 1.5x mais alto que o NOISE_LEVEL padrão para o burst)
+    noise_raw = np.random.normal(0, NOISE_LEVEL * 4, audio_norm.shape).astype(np.float32)
+    noise_filtered = apply_bandpass_filter(noise_raw, sample_rate)
+    
+    # 3. SOMA: Apenas o ruído, já que o audio_norm é zero
+    audio_with_noise = audio_norm + noise_filtered
+    
+    # 4. Clipping (MANTIDO)
+    audio_clipped = np.clip(audio_with_noise, -CLIPPING_FACTOR, CLIPPING_FACTOR)
+    
+    # 5. APLICAÇÃO DO GANHO
+    audio_rescaled = audio_clipped * OUTPUT_GAIN * MAX_INT_16
+    
+    # 6. Conversão final
     audio_final = np.clip(audio_rescaled, np.iinfo(np.int16).min, np.iinfo(np.int16).max).astype(np.int16)
     
     return audio_final.tobytes()

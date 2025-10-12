@@ -426,10 +426,29 @@ class RadioClient:
             time.sleep(CHUNK / RATE / 2) 
 
     def stop_transmission(self):
-        """Para a gravação e transmissão de áudio (PTT desativado)."""
+        """Para a gravação e transmissão de áudio (PTT desativado) e envia o squelch tail."""
         if not self.is_ptt_active:
             return
         
+        # NOVO: SQUELCH TAIL (Chiado de Desligamento)
+        if JOYSTICK_AVAILABLE and self.stream_out and self.stream_out.is_active() and radio_dsp:
+            # O burst é 1 chunk longo (aprox. 89ms com CHUNK=2048, RATE=23000)
+            try:
+                # O módulo DSP precisa de CHUNK e RATE. Eles estão disponíveis globalmente aqui.
+                # A função generate_squelch_tail_burst foi adicionada ao radio_dsp.py
+                squelch_burst = radio_dsp.generate_squelch_tail_burst(CHUNK, RATE) 
+                
+                # Aplica o volume RX do knob da UI (se houver degradação, é aplicado sobre o áudio degradado/reconstruído)
+                if self.rx_volume_factor != 1.0 and hasattr(np, 'frombuffer'):
+                    audio_np = np.frombuffer(squelch_burst, dtype=np.int16)
+                    audio_np = (audio_np * self.rx_volume_factor).astype(np.int16)
+                    squelch_burst = audio_np.tobytes()
+
+                self.stream_out.write(squelch_burst)
+            except Exception as e:
+                # Se falhar, continua o processo de desligamento
+                print(f"[RÁDIO] Falha ao gerar/enviar Squelch Tail: {e}")
+
         self.is_ptt_active = False
         
         if self.stream_in:
