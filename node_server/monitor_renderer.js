@@ -36,6 +36,9 @@ function generatePilotSummaryRows() {
         const data = allPilotSnapshots[pilot_name];
         const conn_status = connData ? connData.tx_sent : false;
 
+        // FIX APLICADO: Garante que 'data_safe' não seja undefined, evitando o TypeError
+        const data_safe = data || {};
+
         const alt = data ? formatNumber(data.alt_ind || 0, 0) : "N/A";
         const vs = data ? formatNumber(data.vs || 0, 0) : "N/A";
         const gs = data ? formatNumber(data.gs || 0, 0) : "N/A"; // ALTERADO: Usando GS para a tabela
@@ -49,9 +52,9 @@ function generatePilotSummaryRows() {
         let network_display_final = 'N/A';
 
         // 1. Determinação do Status de Exibição
-        const is_airborne = (data.on_ground || 1) === 0 || (data.agl || 0) > 50;
-        const is_taxiing = (data.on_ground || 1) === 1 && (data.gs || 0) > 5 && (data.eng_combustion || 0) === 1; // ALTERADO: Usando 'gs'
-        const is_cold = (data.eng_combustion || 0) === 0;
+        const is_airborne = (data_safe.on_ground || 1) === 0 || (data_safe.agl || 0) > 50;
+        const is_taxiing = (data_safe.on_ground || 1) === 1 && (data_safe.gs || 0) > 5 && (data_safe.eng_combustion || 0) === 1; // ALTERADO: Usando 'gs'
+        const is_cold = (data_safe.eng_combustion || 0) === 0;
 
         if (!data) {
             status_text = "CONECTADO (Sem Dados)";
@@ -60,7 +63,7 @@ function generatePilotSummaryRows() {
         else if (!conn_status) {
             const is_stuck_on_ground = connData.last_stop_time;
 
-            if (is_stuck_on_ground && (data.eng_combustion || 0) === 1 && (data.on_ground || 1) === 1) {
+            if (is_stuck_on_ground && (data_safe.eng_combustion || 0) === 1 && (data_safe.on_ground || 1) === 1) {
                 status_text = "PAUSADO (Solo Inteligente)";
             } else {
                 status_text = "PAUSADO (Offline Rede)";
@@ -422,7 +425,7 @@ export async function updateMonitorFiles(data, received_count, total_bytes_recei
                 <tr class="stats-row"><td class="stats-label">Pacotes Enviados (Cliente)</td><td class="stats-value">${sentCount}</td></tr>
                 <tr class="stats-row"><td class="stats-label">Dados Enviados (MB)</td><td class="stats-value">${sentMb} MB</td></tr>
                 <tr class="stats-row"><td class="stats-label">Pacotes Recebidos (Servidor)</td><td class="stats-value">${received_count}</td></tr>
-                <tr class="stats-row"><td class="stats-label">Dados Recebidos (MB)</td><td class="stats-value">${receivedMb} MB</td></tr>
+                <tr class="stats-row"><td class="stats-label">Dados Recebidos (MB)</td><td class="stats-value">${receivedMb} MB</td></td></tr>
             </tbody>
         </table>
 

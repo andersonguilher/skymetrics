@@ -3,12 +3,13 @@
 import axios from 'axios';
 import { IVAO_DATA_URL, VATSIM_DATA_URL, httpsAgent, NETWORK_CHECK_INTERVAL_SERVER } from './config.js';
 import { getTimestamp } from './utils.js';
-import { getGlobalState, getAllPilotSnapshots, getPilotConnections, getClientFlightLogs, logEvent, startTx, stopTx, removePilotConnection } from './state_manager.js';
+import { getGlobalState, getAllPilotSnapshots, getPilotConnections, startTx, stopTx, removePilotConnection } from './state_manager.js';
 
 
 // --- Lógica de Consulta às APIs ---
 
 async function isPilotOnlineIVAO(ivao_id) {
+    // ... (função inalterada) ...
     if (!ivao_id || ivao_id.trim() === 'N/A' || ivao_id.trim() === '' || ivao_id.trim() === '0') return null;
     const ivao_id_int = parseInt(ivao_id.trim());
     if (isNaN(ivao_id_int)) return null;
@@ -30,6 +31,7 @@ async function isPilotOnlineIVAO(ivao_id) {
 }
 
 async function isPilotOnlineVATSIM(vatsim_id) {
+    // ... (função inalterada) ...
     if (!vatsim_id || vatsim_id.trim() === 'N/A' || vatsim_id.trim() === '' || vatsim_id.trim() === '0') return false;
     const vatsim_id_int = parseInt(vatsim_id.trim());
     if (isNaN(vatsim_id_int)) return false;
@@ -51,6 +53,7 @@ async function isPilotOnlineVATSIM(vatsim_id) {
 }
 
 export async function getPilotFlightPlan(vatsim_id, ivao_id) {
+    // ... (função inalterada) ...
     let departureId = "N/A";
     let arrivalId = "N/A";
     let networkUserId = "N/A";
@@ -68,6 +71,7 @@ export async function getPilotFlightPlan(vatsim_id, ivao_id) {
 }
 
 export async function checkNetworkStatus(vatsim_id, ivao_id) {
+    // ... (função inalterada) ...
     const isVatsimOnline = await isPilotOnlineVATSIM(vatsim_id);
     const isIvaoOnline = !!(await isPilotOnlineIVAO(ivao_id));
     return isVatsimOnline || isIvaoOnline;
@@ -81,7 +85,7 @@ export async function networkStatusCheckerLoop() {
         const currentTime = Date.now();
         const pilotConnections = getPilotConnections();
         const allPilotSnapshots = getAllPilotSnapshots();
-        const clientFlightLogs = getClientFlightLogs();
+        // REMOVIDO: const clientFlightLogs = getClientFlightLogs(); // Estado transferido para o cliente
         const globalState = getGlobalState();
 
         if (Object.keys(pilotConnections).length === 0) {
@@ -126,13 +130,15 @@ export async function networkStatusCheckerLoop() {
 
                 const currentGs = pilotSnapshot.gs || pilotSnapshot.ias || 0; // ALTERADO: Prioriza GS
                 const currentOnGround = pilotSnapshot.on_ground || 1;
-                const flightState = clientFlightLogs[pilotName];
-                const isFlightInitiated = flightState && flightState.initial_fuel_logged;
+                // REMOVIDO: const flightState = clientFlightLogs[pilotName];
+                // REMOVIDO: const isFlightInitiated = flightState && flightState.initial_fuel_logged;
+
 
                 // --- LÓGICA DE PAUSA INTELIGENTE (Solo/Parado) ---
                 const isStuckOnGround = currentOnGround === 1 && currentGs < 5 && isOnline; // ALTERADO: De currentIas para currentGs
 
-                if (isStuckOnGround && isTransmitting && isFlightInitiated) {
+                // REMOVIDA A CHECAGEM isFlightInitiated
+                if (isStuckOnGround && isTransmitting) {
                     const lastStopTime = connData.last_stop_time;
                     if (!lastStopTime) {
                         connData.last_stop_time = new Date();
@@ -142,7 +148,8 @@ export async function networkStatusCheckerLoop() {
                     const timeStuckMs = new Date().getTime() - lastStopTime.getTime();
                     if (timeStuckMs >= 5 * 60 * 1000) {
                         stopTx(pilotName, ws);
-                        logEvent(pilotName, "PAUSA_INTELIGENTE", "Pouso/Solo detectado (5min). Transmissão pausada para economia de dados.", pilotSnapshot);
+                        // REMOVIDO: logEvent call
+                        console.log(`[${getTimestamp()}] [SERVER CHECK] Piloto ${pilotName} PAUSADO por 5min parado no solo/online.`);
                         continue;
                     }
                 }
