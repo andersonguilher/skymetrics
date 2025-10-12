@@ -4,13 +4,13 @@ import time
 import random
 from datetime import datetime
 from typing import Any, Dict, Tuple
+from typing import Callable # Importação necessária para Python < 3.9
 
-# --- CONSTANTES E ESTADO GLOBAL ---
-CONN_STATUS = "REAL" 
+# --- CONSTANTES E ESTADO GLOBAL (Inicialização Simulado) ---
+# O status inicial é SIMULADO, a conexão REAL é feita via check_and_connect_simconnect()
+CONN_STATUS = "SIMULADO" 
 sm = None 
 aq = None 
-
-# REMOVIDO: SIMVAR_COM1_VOLUME
 
 DATA_PRECISION = { 
     "alt_ind": 0, "vs": 0, "ias": 1, "gs": 1, "tas": 1, "agl": 0, "on_ground": 0, 
@@ -20,7 +20,6 @@ DATA_PRECISION = {
     "plane_bank_degrees": 0, "engine_vibration_1": 0,
     "com1_active": 3, # Frequência COM1 ativa (MHz)
     "com2_active": 3, # Frequência COM2 ativa (MHz)
-    # REMOVIDO: "com1_volume"
 }
 
 flight_data: Dict[str, Any] = {
@@ -30,7 +29,6 @@ flight_data: Dict[str, Any] = {
     "plane_bank_degrees": 0.0, "engine_vibration_1": 0.0,
     "com1_active": 0.0, 
     "com2_active": 0.0, 
-    # REMOVIDO: "com1_volume"
     "pilot_name": "N/A", "vatsim_id": "", "ivao_id": "", 
     "alerts": {"overspeed_warning": 0, "stall_warning": 0, "beacon_off_engine_on": 0, "engine_fire": 0, 
                "stall_protection_active": 0, "gpws_warning": 0, "flaps_speed_exceeded": 0, "gear_warning_system_active": 0,},
@@ -77,7 +75,6 @@ class MockAircraftRequests:
         if var == "COM_ACTIVE_FREQUENCY:1": return 122.8 
         # Mock corrigido para o valor com espaços (se for o caso)
         if var == "COM_ACTIVE_FREQUENCY:2": return 118.5 
-        # REMOVIDO: Mock para o volume COM1
         # --- Variáveis Originais Omitidas ---
         if var == "AIRSPEED_TRUE": return 230 if t > 10 else 0
         if var == "PLANE_ALT_ABOVE_GROUND": return 9950 if t > 10 else 0
@@ -98,26 +95,65 @@ class MockAircraftRequests:
         if var == "GEAR_WARNING_SYSTEM_ACTIVE": return 0
         return 0
 
-# --- INICIALIZAÇÃO REAL/MOCK ---
-try:
-    from SimConnect import SimConnect, AircraftRequests
-    sm = SimConnect(); aq = AircraftRequests(sm); CONN_STATUS = "REAL" 
-except Exception as e:
-    sm = MockSimConnect(); aq = MockAircraftRequests(sm); CONN_STATUS = "SIMULADO" 
+# --- NOVO: Funções de Gerenciamento da Conexão SimConnect ---
+def check_and_connect_simconnect():
+    """Tenta estabelecer a conexão SimConnect se não estiver ativa."""
+    global sm, aq, CONN_STATUS
+    if CONN_STATUS == "REAL":
+        return
+
+    try:
+        from SimConnect import SimConnect, AircraftRequests
+        # Tenta conectar. Se for bem-sucedido, substitui os mocks.
+        sm_temp = SimConnect() 
+        aq_temp = AircraftRequests(sm_temp)
+        
+        # SUCESSO: Atualiza o estado global
+        sm = sm_temp
+        aq = aq_temp
+        CONN_STATUS = "REAL"
+        print(f"[SIMCONNECT] Conexão REAL estabelecida com sucesso.")
+        
+    except Exception as e:
+        # FALHA: Garante que os mocks estejam configurados.
+        if sm is None or not hasattr(aq, 'get'): # Verifica se aq é o mock
+            sm = MockSimConnect()
+            aq = MockAircraftRequests(sm)
+            CONN_STATUS = "SIMULADO"
+
+# --- Executa a checagem inicial no carregamento do módulo ---
+check_and_connect_simconnect()
 
 def get_safe_value(var_name: str, default: Any = 0) -> Any:
     """Busca um valor do SimConnect/Mock, levantando exceção se a conexão real falhar."""
-    global aq, CONN_STATUS
+    global aq, sm, CONN_STATUS # CORREÇÃO: Consolida todas as declarações 'global' no início.
     try:
         value = aq.get(var_name)
         return value if value is not None else default
     except Exception as e: 
-        if CONN_STATUS == "REAL": raise e
+        # A conexão REAL falhou após ter sido estabelecida (Simulador fechado)
+        if CONN_STATUS == "REAL": 
+            print(f"[SIMCONNECT] ERRO na leitura (Conexão REAL perdida): {e}")
+            
+            if sm:
+                try: sm.exit()
+                except: pass
+            
+            # Reverte para Mock/SIMULADO para tentar reconectar no próximo fetch_all_data
+            sm = MockSimConnect()
+            aq = MockAircraftRequests(sm)
+            CONN_STATUS = "SIMULADO"
+            # Lança uma exceção para que o ws_monitor.py possa atualizar o estado do sistema/rádio
+            raise ConnectionError(f"SimConnect connection lost: {e}") 
+
         return default
 
 def fetch_all_data():
     """Busca dados COMPLETOS do simulador e atualiza o dicionário global `flight_data`."""
     global flight_data
+    
+    # CHAVE: Tenta conectar se estiver em modo SIMULADO
+    check_and_connect_simconnect()
     
     # 1. Coleta de VS e Coerção de Zero 
     flight_data["vs"] = get_safe_value("VERTICAL_SPEED")
@@ -142,14 +178,11 @@ def fetch_all_data():
     flight_data["engine_vibration_1"] = get_safe_value("GENERAL_ENG_VIBRATION:1", default=0.0)
 
     # Coleta das frequências COM ativas:
-    # O log de diagnóstico mostrou que raw_com1 (snake_case) retorna o valor correto em float (122.8)
     raw_com1 = get_safe_value("COM_ACTIVE_FREQUENCY:1", default=0)
-    raw_com2 = get_safe_value("COM_ACTIVE_FREQUENCY:2", default=0) # Mantém este com espaços para consistência de SimVar
+    raw_com2 = get_safe_value("COM_ACTIVE_FREQUENCY:2", default=0) 
 
     flight_data["com1_active"] = decode_com_frequency(raw_com1)
     flight_data["com2_active"] = decode_com_frequency(raw_com2)
-    
-    # REMOVIDO: Leitura do volume COM1
     
     # Coleta de Status e Luzes e Lógica de Alertas (Original)
     flight_data["eng_combustion"] = get_safe_value("GENERAL_ENG_COMBUSTION:1", default=0)

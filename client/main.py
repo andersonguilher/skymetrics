@@ -9,7 +9,7 @@ import threading
 from typing import Dict, Any
 from subprocess import Popen 
 import time
-from tkinter import messagebox # NOVO: Importa messagebox para exibir erros na UI
+from tkinter import messagebox 
 
 
 # IMPORTAÇÕES CORRIGIDAS (AGORA RELATIVAS PARA PYTHON -M)
@@ -134,29 +134,56 @@ class MainApplication(ttk.Window):
 
     # --- LÓGICA RÁDIO CONFIGURAÇÃO ---
     def _show_radio_config_window(self):
-        """Abre a janela de configuração do rádio, garantindo que apenas uma esteja ativa."""
-        # DIAGNÓSTICO 1: Confirma que o botão foi clicado
+        """
+        Abre a janela de configuração do rádio. 
+        Se o cliente de rádio não foi inicializado (modo SIMULADO ou falha), 
+        cria um RadioClient temporário para a janela de configurações.
+        """
         print("[DIAG] Tentativa de abrir RadioConfigWindow...") 
         
         if self.radio_config_window and self.radio_config_window.winfo_exists():
             self.radio_config_window.lift()
-        elif self.monitor and self.monitor.radio_client:
-            # DIAGNÓSTICO 2: Confirma que o objeto RadioClient existe e é válido
-            print(f"[DIAG] RadioClient válido: {self.monitor.radio_client}")
+            return
+            
+        target_radio_client = None
+        
+        # 1. Tenta usar o cliente já inicializado pelo monitor (se REAL e bem-sucedido)
+        if self.monitor and self.monitor.radio_client:
+            target_radio_client = self.monitor.radio_client
+            print(f"[DIAG] Usando RadioClient ativo do Monitor.")
+        
+        # 2. Se não houver cliente ativo (SIMULADO ou falha inicial)
+        elif self.monitor:
+            print("[DIAG] Tentando criar RadioClient temporário para configuração.")
             try:
-                self.radio_config_window = RadioConfigWindow(self, self.monitor.radio_client)
+                # Importa a classe DENTRO do método para evitar falha no __init__ do MainApplication
+                from .radio_ui_logic import RadioClient 
+                target_radio_client = RadioClient()
             except Exception as e:
-                # CHAVE: Exibe o erro para o usuário
+                # Falha ao instanciar o RadioClient devido a dependências ausentes (o caso original do usuário)
                 messagebox.showerror("Erro ao Abrir Configurações do Rádio", 
-                                     f"Falha ao iniciar a janela de configurações: {e}. Verifique as dependências (pyaudio, socketio, pygame, etc.) e se o PTT/Dispositivos estão configurados corretamente.")
-                self.radio_config_window = None # Limpa a referência da instância corrompida
+                                     f"Falha ao instanciar o RadioClient: {e}. Verifique as dependências (pyaudio, pygame, etc.) e se o PTT/Dispositivos estão configurados corretamente.")
+                return
+
+        if target_radio_client:
+            try:
+                self.radio_config_window = RadioConfigWindow(self, target_radio_client)
+            except Exception as e:
+                # Este bloco captura erros que ocorrem durante o setup da janela TK (ex: falha de áudio GUI)
+                messagebox.showerror("Erro ao Abrir Configurações do Rádio", 
+                                     f"Falha ao iniciar a janela de configurações: {e}. O RadioClient temporário será desconectado.")
+                # Se o cliente temporário foi criado, desconecte-o. Se era o cliente do monitor, ele fica ativo.
+                if target_radio_client is not self.monitor.radio_client:
+                    target_radio_client.disconnect() 
+                self.radio_config_window = None 
         else:
-            # DIAGNÓSTICO 3: Confirma se o monitor/cliente de rádio falhou na inicialização (self.monitor.radio_client é None)
-            messagebox.showerror("Erro de Inicialização do Rádio", "O cliente de rádio não foi inicializado corretamente. Verifique se as dependências (PyAudio, SocketIO) foram instaladas.")
-            print("[DIAG] Falha na inicialização: self.monitor.radio_client é None.")
+             # Este caso é um fallback, mas não deve ocorrer se o monitor estiver ativo
+             messagebox.showerror("Erro de Inicialização do Rádio", "O cliente de rádio não foi inicializado corretamente. Verifique se as dependências (PyAudio, SocketIO) foram instaladas.")
+             print("[DIAG] Falha na inicialização: self.monitor.radio_client é None.")
             
     def _on_radio_config_closing(self):
         """Callback de fechamento da janela de rádio para atualizar o estado do cliente."""
+        # A janela de rádio é responsável por salvar a config no client_config.json
         if self.monitor and self.monitor.radio_client:
             self.monitor.radio_client.update_audio_streams() # Re-inicia os streams com novos dispositivos, se necessário
 
