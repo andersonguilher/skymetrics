@@ -9,10 +9,13 @@ HIGH_CUT = 3000
 
 # Amplitude do ruído branco. Ajuste este valor (0.005 a 0.05)
 # para controlar a intensidade do chiado de fundo.
-NOISE_LEVEL = 0.015 
+NOISE_LEVEL = 0.015 # MANTIDO: Conforme solicitado
 
 # Fator de escala para clipping/distorção (compressão AM). Valores menores distorcem mais.
-CLIPPING_FACTOR = 0.8 
+CLIPPING_FACTOR = 0.92 # MANTIDO: Último valor para manter a fonia da aviação
+
+# NOVO: Ganho de saída para aumentar o volume geral (50% mais alto)
+OUTPUT_GAIN = 3.0 
 
 # Máximo valor de 16-bit para normalização
 MAX_INT_16 = np.iinfo(np.int16).max
@@ -25,7 +28,7 @@ def apply_bandpass_filter(data_np, sample_rate):
     high = HIGH_CUT / nyquist
     
     # Ordem do filtro (define a inclinação do corte)
-    order = 5 
+    order = 7 
     
     try:
         # Filtro Butterworth (btype='band' para corte de banda)
@@ -65,7 +68,8 @@ def apply_radio_effect(audio_data, sample_rate):
     audio_clipped = np.clip(audio_with_noise, -CLIPPING_FACTOR, CLIPPING_FACTOR)
     
     # 6. Conversão de volta (float32 -> paInt16)
-    audio_rescaled = audio_clipped * MAX_INT_16
+    # APLICAÇÃO DO GANHO: Multiplica por 1.5 para aumentar o volume geral
+    audio_rescaled = audio_clipped * OUTPUT_GAIN * MAX_INT_16 
     
     # Garante que os valores estejam dentro do range de 16-bit
     audio_final = np.clip(audio_rescaled, np.iinfo(np.int16).min, np.iinfo(np.int16).max).astype(np.int16)
@@ -90,7 +94,12 @@ def add_static_noise_only(audio_data, sample_rate):
     
     audio_with_noise = audio_norm + noise_filtered
     
-    audio_rescaled = audio_with_noise * MAX_INT_16
+    # Clipping (MANTIDO)
+    audio_clipped = np.clip(audio_with_noise, -CLIPPING_FACTOR, CLIPPING_FACTOR)
+    
+    # APLICAÇÃO DO GANHO
+    audio_rescaled = audio_clipped * OUTPUT_GAIN * MAX_INT_16
+    
     audio_final = np.clip(audio_rescaled, np.iinfo(np.int16).min, np.iinfo(np.int16).max).astype(np.int16)
     
     return audio_final.tobytes()

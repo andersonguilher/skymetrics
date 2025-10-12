@@ -49,7 +49,7 @@ DEFAULT_SERVER_URL = 'http://www.kafly.com.br:3000'
 PTT_KEY_DEFAULT = 'space'
 
 # --- Configurações de Áudio (Herdadas do projeto rádio) ---
-CHUNK = 1024
+CHUNK = 4096 # Alterado para máxima estabilidade
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 RATE = 44100
@@ -197,6 +197,8 @@ class RadioClient:
         self.loopback_active = self.config.get('loopback_active', False)
         
         self.setup_socketio_events()
+        
+        # Pygame já foi inicializado no bloco try/except
         
     def setup_socketio_events(self):
         self.sio.on('connect', self._on_connect)
@@ -406,9 +408,94 @@ class RadioClient:
             self.joystick_thread.start()
 
     def joystick_monitor_loop(self):
-        """Thread dedicada para monitorar o estado do joystick (simplificado)."""
-        if not JOYSTICK_AVAILABLE: return
-        pass
+        """Thread dedicada para monitorar o estado do joystick (COMPLETO)."""
+        if not JOYSTICK_AVAILABLE:
+            return
+
+        try:
+            # 1. Inicialização e Busca do Joystick
+            pygame.joystick.init()
+            joysticks = [pygame.joystick.Joystick(i) for i in range(pygame.joystick.get_count())]
+        except Exception:
+            joysticks = []
+            
+        if not joysticks:
+            self.current_joystick = None
+            return
+
+        self.current_joystick = joysticks[0]
+        self.current_joystick.init()
+        
+        # Lógica de PTT e Captura no Loop
+        while True:
+            try:
+                pygame.event.pump() # Permite ao Pygame processar eventos
+                
+                # A) Lógica de Captura (Prioridade)
+                if self.is_listening_for_ptt:
+                    for event in pygame.event.get():
+                        if event.type == pygame.locals.JOYBUTTONDOWN:
+                            if event.joy == self.current_joystick.get_id():
+                                # Chama a função de finalização da captura no thread principal
+                                tk.get_default_root().after(0, lambda: self._end_ptt_capture(f"JOY_BUTTON_{event.button}"))
+                                return 
+
+                # B) Lógica de Ativação PTT (Polling de Estado)
+                elif self.ptt_key.startswith('JOY_BUTTON_'):
+                    try:
+                        target_button_index = int(self.ptt_key.split('_')[-1])
+                    except ValueError:
+                        time.sleep(0.01); continue # PTT Key mal formatada
+
+                    button_state = self.current_joystick.get_button(target_button_index)
+
+                    if button_state and not self.is_ptt_active:
+                        tk.get_default_root().after(0, self.start_transmission_ptt) 
+                    
+                    elif not button_state and self.is_ptt_active:
+                        tk.get_default_root().after(0, self.stop_transmission) 
+                
+                else:
+                     pygame.event.get() # Limpa o buffer de eventos se PTT não for Joystick
+
+            except Exception:
+                break # Sai do loop em caso de erro no joystick
+
+            time.sleep(0.01) # Poll rate (100 vezes por segundo)
+
+        # Cleanup
+        try:
+            pygame.joystick.quit()
+            pygame.quit()
+        except Exception:
+            pass
+        self.current_joystick = None
+        
+    def _end_ptt_capture(self, captured_key: str | None):
+        """Finaliza o modo de escuta e define a nova tecla (chamado do joystick/teclado)."""
+        if not self.is_listening_for_ptt:
+            return
+
+        self.is_listening_for_ptt = False
+        
+        # 1. Obter o novo nome da chave
+        if captured_key:
+            new_key = captured_key.lower()
+        else:
+            new_key = self.ptt_key
+
+        # 2. Atualiza a configuração do cliente
+        self.ptt_key = new_key
+        self.config['ptt_key'] = new_key
+        save_config(self.config)
+        
+        # 3. Re-registra os hotkeys
+        self.set_ptt_hotkeys(new_key, True)
+        
+        # 4. Força a atualização da UI (o objeto da janela de configurações precisa ser atualizado)
+        # É uma simulação da chamada que o objeto RadioConfigWindow faria.
+        pass # A UI é atualizada diretamente pela janela de configurações, que está na thread principal.
+
         
     # --- Métodos de Configuração (Volume, PTT Key) ---
     
