@@ -1,6 +1,7 @@
 .venv/
 dist/
 build/
+__pycache__/
 SkyMetricsMonitor.spec
 client/client_config.ini
 node_server/node_modules/
