@@ -210,7 +210,7 @@ class RadioClient:
         self.loopback_active = self.config.get('loopback_active', False)
         
         # Configuração para Loopback com Distância
-        self.loopback_distance_km = self.config.get('loopback_distance_km', 50.0)
+        self.loopback_distance_km = self.config.get('loopback_distance_km', 0.0)
         
         # REMOVIDO: self.com_volume
         
