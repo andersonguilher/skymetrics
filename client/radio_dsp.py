@@ -15,7 +15,7 @@ NOISE_LEVEL = 0.015 # MANTIDO: Conforme solicitado
 CLIPPING_FACTOR = 0.92 # MANTIDO: Último valor para manter a fonia da aviação
 
 # NOVO: Ganho de saída para aumentar o volume geral (50% mais alto)
-OUTPUT_GAIN = 3.0 
+OUTPUT_GAIN = 8.0 
 
 # Máximo valor de 16-bit para normalização
 MAX_INT_16 = np.iinfo(np.int16).max

@@ -72,7 +72,7 @@ class MockAircraftRequests:
         # Mock corrigido para o valor float que o usuário viu no log (snake_case)
         if var == "COM_ACTIVE_FREQUENCY:1": return 122.8 
         # Mock corrigido para o valor com espaços (se for o caso)
-        if var == "COM ACTIVE FREQUENCY:2": return 118.5 
+        if var == "COM_ACTIVE_FREQUENCY:2": return 118.5 
         # --- Variáveis Originais Omitidas ---
         if var == "AIRSPEED_TRUE": return 230 if t > 10 else 0
         if var == "PLANE_ALT_ABOVE_GROUND": return 9950 if t > 10 else 0
@@ -139,7 +139,7 @@ def fetch_all_data():
     # Coleta das frequências COM ativas:
     # O log de diagnóstico mostrou que raw_com1 (snake_case) retorna o valor correto em float (122.8)
     raw_com1 = get_safe_value("COM_ACTIVE_FREQUENCY:1", default=0)
-    raw_com2 = get_safe_value("COM ACTIVE FREQUENCY:2", default=0) # Mantém este com espaços para consistência de SimVar
+    raw_com2 = get_safe_value("COM_ACTIVE_FREQUENCY:2", default=0) # Mantém este com espaços para consistência de SimVar
 
     flight_data["com1_active"] = decode_com_frequency(raw_com1)
     flight_data["com2_active"] = decode_com_frequency(raw_com2)

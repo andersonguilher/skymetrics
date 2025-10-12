@@ -49,10 +49,10 @@ DEFAULT_SERVER_URL = 'http://www.kafly.com.br:3000'
 PTT_KEY_DEFAULT = 'space'
 
 # --- Configurações de Áudio (Herdadas do projeto rádio) ---
-CHUNK = 4096 # Alterado para máxima estabilidade
+CHUNK = 2048 # Alterado para máxima estabilidade
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
-RATE = 44100
+RATE = 23000
 MAX_INT_16 = np.iinfo(np.int16).max # Assumindo numpy está instalado
 
 # --- FUNÇÃO AUXILIAR ---

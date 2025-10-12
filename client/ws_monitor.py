@@ -172,14 +172,12 @@ class FlightMonitor:
         simconnect_fail_logged = False
         
         while self.running and self.ws_client.sock and self.ws_client.sock.connected:
-            if not self.transmitting:
-                time.sleep(0.1); continue 
-            
             try:
+                # 1. COLETAR DADOS DO SIMULADOR (Sempre)
                 fetch_all_data()
                 current_rounded = create_rounded_data(flight_data)
                 
-                # NOVO: Sintonizar o rádio com a frequência COM1 ativa
+                # 2. SINTONIZAR O RÁDIO (Sempre, independentemente do status de transmissão)
                 if self.radio_client and current_rounded.get('com1_active', 0.0) != 0.0:
                     com1_freq = current_rounded['com1_active']
                     new_freq_str = f"{com1_freq:.3f}"
@@ -189,6 +187,14 @@ class FlightMonitor:
                         self.radio_client.tune_frequency(new_freq_str)
                         self.last_tuned_freq = new_freq_str # Atualiza a última sintonizada
                 
+                # 3. ATUALIZAR UI LOCAL (Sempre)
+                self.master_app.after(0, self.master_app.current_frame.update_data, current_rounded)
+                
+                # 4. VERIFICAR STATUS DE TRANSMISSÃO (Bloqueia APENAS o Log de Eventos e o envio da Telemetria)
+                if not self.transmitting:
+                    time.sleep(0.1); continue 
+                
+                # Início da lógica que SÓ DEVE rodar se estiver transmitindo
                 if self.event_logger:
                     self.event_logger.check_and_log_events(current_rounded) 
 
@@ -197,7 +203,6 @@ class FlightMonitor:
                 if has_significant_change(current_rounded, self.last_sent_data) or force_send:
                     self.last_sent_data = current_rounded.copy()
                     self.packets_sent_count += 1
-                    self.master_app.after(0, self.master_app.current_frame.update_data, current_rounded)
                     
                     payload_to_send = json.dumps({
                         **current_rounded, 
