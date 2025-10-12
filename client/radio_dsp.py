@@ -1,3 +1,5 @@
+# Arquivo: client/radio_dsp.py
+
 import numpy as np
 from scipy import signal
 import pyaudio 
@@ -9,16 +11,20 @@ HIGH_CUT = 3000
 
 # Amplitude do ruído branco. Ajuste este valor (0.005 a 0.05)
 # para controlar a intensidade do chiado de fundo.
-NOISE_LEVEL = 0.015 # MANTIDO: Conforme solicitado
+NOISE_LEVEL = 0.015 
 
 # Fator de escala para clipping/distorção (compressão AM). Valores menores distorcem mais.
-CLIPPING_FACTOR = 0.92 # MANTIDO: Último valor para manter a fonia da aviação
+CLIPPING_FACTOR = 0.92 
 
-# NOVO: Ganho de saída para aumentar o volume geral (50% mais alto)
+# REVERTIDO: BASE_GAIN é o novo OUTPUT_GAIN fixo.
 OUTPUT_GAIN = 8.0 
 
 # Máximo valor de 16-bit para normalização
 MAX_INT_16 = np.iinfo(np.int16).max
+
+# Constantes para o limite de degradação
+MAX_DEGRADATION_NOISE_LEVEL = 0.08  # Nível máximo de ruído para degradação total
+MIN_VOICE_GAIN = 0.1                # Ganho mínimo da voz para degradação total (10% do original)
 
 
 def apply_bandpass_filter(data_np, sample_rate):
@@ -41,8 +47,7 @@ def apply_bandpass_filter(data_np, sample_rate):
 
 def apply_radio_effect(audio_data, sample_rate):
     """
-    Aplica os efeitos de rádio de aviação (filtro, ruído e clipping).
-    O ruído é filtrado para remover agudos.
+    Aplica os efeitos de rádio de aviação (filtro, ruído e clipping) com o OUTPUT_GAIN fixo.
     """
     if not audio_data:
         return audio_data
@@ -68,7 +73,7 @@ def apply_radio_effect(audio_data, sample_rate):
     audio_clipped = np.clip(audio_with_noise, -CLIPPING_FACTOR, CLIPPING_FACTOR)
     
     # 6. Conversão de volta (float32 -> paInt16)
-    # APLICAÇÃO DO GANHO: Multiplica por 1.5 para aumentar o volume geral
+    # APLICAÇÃO DO GANHO: Multiplica pelo OUTPUT_GAIN fixo
     audio_rescaled = audio_clipped * OUTPUT_GAIN * MAX_INT_16 
     
     # Garante que os valores estejam dentro do range de 16-bit
@@ -76,6 +81,49 @@ def apply_radio_effect(audio_data, sample_rate):
 
     return audio_final.tobytes()
 
+def apply_degradation(audio_data, sample_rate, degradation_factor):
+    """
+    Aplica degradação ajustando o ruído e o volume da voz, usando o OUTPUT_GAIN fixo.
+    """
+    if not audio_data:
+        return audio_data
+
+    # 1. Conversão e Normalização (bytes -> float32)
+    audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
+    audio_norm = audio_np / MAX_INT_16
+    
+    # 2. FILTRAGEM DE VOZ: Aplica o corte de banda
+    audio_filtered_voice = apply_bandpass_filter(audio_norm, sample_rate)
+    
+    # --- Lógica de Degradação Baseada no Fator (0.0 a 1.0) ---
+    
+    # A. Ajuste do Nível de Ruído (aumenta o ruído com o fator)
+    current_noise_level = NOISE_LEVEL + (MAX_DEGRADATION_NOISE_LEVEL - NOISE_LEVEL) * degradation_factor
+    
+    # B. Ajuste do Ganho de Voz (reduz o ganho de voz com o fator)
+    voice_gain_factor = 1.0 - (1.0 - MIN_VOICE_GAIN) * degradation_factor
+    
+    # Aplica o novo ganho na voz filtrada
+    audio_filtered_voice *= voice_gain_factor 
+
+    # 3. GERAÇÃO E FILTRAGEM DO RUÍDO:
+    noise_raw = np.random.normal(0, current_noise_level, audio_filtered_voice.shape).astype(np.float32)
+    noise_filtered = apply_bandpass_filter(noise_raw, sample_rate)
+    
+    # 4. SOMA: Combina a voz degradada com o ruído ajustado
+    audio_with_noise = audio_filtered_voice + noise_filtered
+    
+    # 5. Clipping (Distorção AM) - Mantém para o efeito de rádio
+    audio_clipped = np.clip(audio_with_noise, -CLIPPING_FACTOR, CLIPPING_FACTOR)
+    
+    # 6. Conversão de volta (float32 -> paInt16)
+    # APLICAÇÃO DO GANHO FINAL: Usa o OUTPUT_GAIN fixo
+    audio_rescaled = audio_clipped * OUTPUT_GAIN * MAX_INT_16 
+    
+    # Garante que os valores estejam dentro do range de 16-bit
+    audio_final = np.clip(audio_rescaled, np.iinfo(np.int16).min, np.iinfo(np.int16).max).astype(np.int16)
+
+    return audio_final.tobytes()
 
 def add_static_noise_only(audio_data, sample_rate):
     """

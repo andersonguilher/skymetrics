@@ -187,6 +187,13 @@ class FlightMonitor:
                         self.radio_client.tune_frequency(new_freq_str)
                         self.last_tuned_freq = new_freq_str # Atualiza a última sintonizada
                 
+                # Enviar posição para o Servidor de Rádio (a cada loop de 0.1s)
+                if self.radio_client:
+                    lat = current_rounded.get('lat', 0.0)
+                    lng = current_rounded.get('lng', 0.0)
+                    # REMOVIDO: leitura e passagem do volume COM
+                    self.radio_client.send_position(lat, lng)
+
                 # 3. ATUALIZAR UI LOCAL (Sempre)
                 self.master_app.after(0, self.master_app.current_frame.update_data, current_rounded)
                 

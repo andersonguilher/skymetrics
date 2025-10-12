@@ -10,6 +10,8 @@ CONN_STATUS = "REAL"
 sm = None 
 aq = None 
 
+# REMOVIDO: SIMVAR_COM1_VOLUME
+
 DATA_PRECISION = { 
     "alt_ind": 0, "vs": 0, "ias": 1, "gs": 1, "tas": 1, "agl": 0, "on_ground": 0, 
     "total_fuel": 0, "gear_left_pos": 0, "g_force": 1, 
@@ -18,6 +20,7 @@ DATA_PRECISION = {
     "plane_bank_degrees": 0, "engine_vibration_1": 0,
     "com1_active": 3, # Frequência COM1 ativa (MHz)
     "com2_active": 3, # Frequência COM2 ativa (MHz)
+    # REMOVIDO: "com1_volume"
 }
 
 flight_data: Dict[str, Any] = {
@@ -27,6 +30,7 @@ flight_data: Dict[str, Any] = {
     "plane_bank_degrees": 0.0, "engine_vibration_1": 0.0,
     "com1_active": 0.0, 
     "com2_active": 0.0, 
+    # REMOVIDO: "com1_volume"
     "pilot_name": "N/A", "vatsim_id": "", "ivao_id": "", 
     "alerts": {"overspeed_warning": 0, "stall_warning": 0, "beacon_off_engine_on": 0, "engine_fire": 0, 
                "stall_protection_active": 0, "gpws_warning": 0, "flaps_speed_exceeded": 0, "gear_warning_system_active": 0,},
@@ -73,6 +77,7 @@ class MockAircraftRequests:
         if var == "COM_ACTIVE_FREQUENCY:1": return 122.8 
         # Mock corrigido para o valor com espaços (se for o caso)
         if var == "COM_ACTIVE_FREQUENCY:2": return 118.5 
+        # REMOVIDO: Mock para o volume COM1
         # --- Variáveis Originais Omitidas ---
         if var == "AIRSPEED_TRUE": return 230 if t > 10 else 0
         if var == "PLANE_ALT_ABOVE_GROUND": return 9950 if t > 10 else 0
@@ -143,6 +148,8 @@ def fetch_all_data():
 
     flight_data["com1_active"] = decode_com_frequency(raw_com1)
     flight_data["com2_active"] = decode_com_frequency(raw_com2)
+    
+    # REMOVIDO: Leitura do volume COM1
     
     # Coleta de Status e Luzes e Lógica de Alertas (Original)
     flight_data["eng_combustion"] = get_safe_value("GENERAL_ENG_COMBUSTION:1", default=0)

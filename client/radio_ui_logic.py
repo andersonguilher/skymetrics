@@ -55,7 +55,11 @@ CHANNELS = 1
 RATE = 23000
 MAX_INT_16 = np.iinfo(np.int16).max # Assumindo numpy está instalado
 
-# --- FUNÇÃO AUXILIAR ---
+# NOVO: Constantes de Alcance (Replicando o Servidor)
+MAX_RANGE_KM = 150.0 
+MIN_RANGE_KM = 5.0
+
+# --- FUNÇÕES AUXILIARES ---
 def get_device_name_by_index(index, device_map):
     """Encontra o nome do dispositivo dado o índice."""
     if index is None: return None
@@ -64,7 +68,54 @@ def get_device_name_by_index(index, device_map):
             return name
     return None
 
-# --- CLASSES AUXILIARES (Refatoradas de client.py) ---
+# --- LÓGICA DE GERENCIAMENTO DE ÁUDIO ---
+
+def get_audio_devices():
+    """Lista todos os dispositivos de entrada e saída disponíveis."""
+    try:
+        p = pyaudio.PyAudio()
+    except Exception:
+        return {}, {} # Retorna vazio se PyAudio falhar
+        
+    input_devs = {}
+    output_devs = {}
+    
+    for i in range(p.get_device_count()):
+        info = p.get_device_info_by_index(i)
+        if info.get('maxInputChannels') > 0:
+            input_devs[f"{info.get('name')} (Index {i})"] = i
+        if info.get('maxOutputChannels') > 0:
+            output_devs[f"{info.get('name')} (Index {i})"] = i
+            
+    p.terminate()
+    return input_devs, output_devs
+
+def load_config():
+    """Carrega as configurações salvas do ficheiro JSON."""
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, 'r') as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                pass
+    return {}
+
+def save_config(config_data):
+    """Salva a URL, os índices dos dispositivos, a tecla PTT e o volume TX/RX e o Loopback."""
+    with open(CONFIG_FILE, 'w') as f:
+        json.dump(config_data, f, indent=4)
+
+# Função para calcular o fator de degradação localmente (replicando o servidor)
+def calculate_loopback_factor(distance_km: float) -> float:
+    """Calcula o fator de degradação (0.0 a 1.0) para a distância dada."""
+    distance_km = max(0.0, float(distance_km))
+    if distance_km <= MIN_RANGE_KM: return 0.0
+    if distance_km >= MAX_RANGE_KM: return 1.0
+    
+    # Interpolação linear
+    return (distance_km - MIN_RANGE_KM) / (MAX_RANGE_KM - MIN_RANGE_KM)
+
+# --- CLASSES AUXILIARES (VolumeKnob e outras mantidas) ---
 
 class VolumeKnob(tk.Canvas):
     # A classe Knob foi mantida como a lógica de UI mais complexa
@@ -131,44 +182,6 @@ class VolumeKnob(tk.Canvas):
         self._draw_knob()
 
 
-# --- LÓGICA DE GERENCIAMENTO DE ÁUDIO ---
-
-def get_audio_devices():
-    """Lista todos os dispositivos de entrada e saída disponíveis."""
-    try:
-        p = pyaudio.PyAudio()
-    except Exception:
-        return {}, {} # Retorna vazio se PyAudio falhar
-        
-    input_devs = {}
-    output_devs = {}
-    
-    for i in range(p.get_device_count()):
-        info = p.get_device_info_by_index(i)
-        if info.get('maxInputChannels') > 0:
-            input_devs[f"{info.get('name')} (Index {i})"] = i
-        if info.get('maxOutputChannels') > 0:
-            output_devs[f"{info.get('name')} (Index {i})"] = i
-            
-    p.terminate()
-    return input_devs, output_devs
-
-def load_config():
-    """Carrega as configurações salvas do ficheiro JSON."""
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r') as f:
-            try:
-                return json.load(f)
-            except json.JSONDecodeError:
-                pass
-    return {}
-
-def save_config(config_data):
-    """Salva a URL, os índices dos dispositivos, a tecla PTT e o volume TX/RX e o Loopback."""
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(config_data, f, indent=4)
-
-
 # --- CLASSE PRINCIPAL DO CLIENTE RÁDIO ---
 
 class RadioClient:
@@ -196,6 +209,11 @@ class RadioClient:
         self.ptt_key = self.config.get('ptt_key', PTT_KEY_DEFAULT)
         self.loopback_active = self.config.get('loopback_active', False)
         
+        # Configuração para Loopback com Distância
+        self.loopback_distance_km = self.config.get('loopback_distance_km', 50.0)
+        
+        # REMOVIDO: self.com_volume
+        
         self.setup_socketio_events()
         
         # Pygame já foi inicializado no bloco try/except
@@ -205,6 +223,8 @@ class RadioClient:
         self.sio.on('disconnect', self._on_disconnect)
         self.sio.on('broadcast_audio', self._on_broadcast_audio)
         self.sio.on('frequency_changed', self._on_frequency_changed)
+    
+    # REMOVIDO: update_com_volume
 
     # --- Métodos SocketIO ---
 
@@ -220,19 +240,43 @@ class RadioClient:
         self.stop_transmission()
         if JOYSTICK_AVAILABLE:
             self.set_ptt_hotkeys(self.ptt_key, False)
-        
+            
+    # NOVO MÉTODO: Envia a posição para o servidor de rádio
+    def send_position(self, lat: float, lng: float):
+        """Envia a posição atual para o servidor para cálculo de degradação."""
+        if self.sio.connected and lat != 0.0 and lng != 0.0:
+            try:
+                self.sio.emit('update_position', {'lat': lat, 'lng': lng})
+            except Exception:
+                pass # Ignora erros de emissão
+
+    # MODIFICAR: _on_broadcast_audio (Aplica o rx_volume_factor e degradação)
     def _on_broadcast_audio(self, data):
         if not JOYSTICK_AVAILABLE or self.p is None: return
         
+        # NOVO: Recebe um objeto { audio: Buffer, factor: float }
+        audio_data = data.get('audio')
+        degradation_factor = data.get('factor', 0.0) 
+        
+        if not audio_data: return
+        
         if self.stream_out and self.stream_out.is_active() and not self.is_ptt_active:
             try:
-                processed_data = data
+                processed_data = audio_data 
+                
+                # 1. APLICAÇÃO DE DEGRADAÇÃO BASEADA NA DISTÂNCIA (Recebida do Server)
+                if degradation_factor > 0.0 and radio_dsp:
+                     # O DSP aplica a degradação (ajustando voz e ruído) e o ganho final (OUTPUT_GAIN fixo)
+                     processed_data = radio_dsp.apply_degradation(audio_data, RATE, degradation_factor)
+                
+                # 2. APLICA O VOLUME RX DO KNOB DA UI (Se houver degradação, é aplicado sobre o áudio degradado/reconstruído)
                 if self.rx_volume_factor != 1.0 and hasattr(np, 'frombuffer'):
-                    audio_np = np.frombuffer(data, dtype=np.int16)
+                    audio_np = np.frombuffer(processed_data, dtype=np.int16)
                     audio_np = (audio_np * self.rx_volume_factor).astype(np.int16)
                     processed_data = audio_np.tobytes()
                 
                 self.stream_out.write(processed_data)
+
             except Exception:
                 pass
 
@@ -333,7 +377,7 @@ class RadioClient:
             self.is_ptt_active = False
 
     def transmit_audio(self):
-        """Loop para ler, aplicar DSP e ENVIAR."""
+        """Loop para ler, aplicar DSP e ENVIAR. (AJUSTADO PARA LOOPBACK)"""
         if not radio_dsp: 
             self.stop_transmission()
             return
@@ -348,14 +392,32 @@ class RadioClient:
                     audio_np = (audio_np * self.mic_volume_factor).astype(np.int16)
                     raw_audio_data = audio_np.tobytes()
                 
-                # 2. PROCESSAMENTO DSP (filtro, ruído, clipping)
+                # 2. PROCESSAMENTO DSP (filtro, ruído, clipping - Standard Radio Effect)
+                # Usa o OUTPUT_GAIN fixo
                 processed_audio_data = radio_dsp.apply_radio_effect(raw_audio_data, RATE)
                 
-                # 3. CONTROLE DE LOOPBACK
+                # 3. CONTROLE DE LOOPBACK (AJUSTADO)
                 if self.loopback_active and self.stream_out and self.stream_out.is_active():
-                    self.stream_out.write(processed_audio_data) 
+                    
+                    # Calcula o fator de degradação com a distância virtual
+                    degradation_factor = calculate_loopback_factor(self.loopback_distance_km)
+                    
+                    # Aplica a degradação e o volume RX do cliente
+                    if radio_dsp:
+                         # 1. Aplica a degradação (usa OUTPUT_GAIN fixo)
+                         loopback_audio = radio_dsp.apply_degradation(raw_audio_data, RATE, degradation_factor)
+
+                         # 2. Aplica o volume RX da UI por cima
+                         if self.rx_volume_factor != 1.0 and hasattr(np, 'frombuffer'):
+                             audio_np = np.frombuffer(loopback_audio, dtype=np.int16)
+                             audio_np = (audio_np * self.rx_volume_factor).astype(np.int16)
+                             loopback_audio = audio_np.tobytes()
+                    else:
+                        loopback_audio = raw_audio_data # Fallback
+
+                    self.stream_out.write(loopback_audio) 
                 
-                # 4. Envia o chunk processado ao servidor
+                # 4. Envia o chunk processado (volume 1.0) ao servidor
                 self.sio.emit('audio_chunk', processed_audio_data)
                 
             except Exception:
@@ -377,7 +439,7 @@ class RadioClient:
             except: pass
             self.stream_in = None
             
-    # --- Lógica PTT e Joystick ---
+    # --- Lógica PTT e Joystick (mantida) ---
     
     def set_ptt_hotkeys(self, key_name, register):
         """Registra/desregistra as hotkeys PTT (apenas para TECLADO)."""
@@ -478,13 +540,12 @@ class RadioClient:
 
         self.is_listening_for_ptt = False
         
-        # 1. Obter o novo nome da chave
         if captured_key:
             new_key = captured_key.lower()
         else:
             new_key = self.ptt_key
 
-        # 2. Atualiza a configuração do cliente
+        # 1. Atualiza a configuração do cliente
         self.ptt_key = new_key
         self.config['ptt_key'] = new_key
         save_config(self.config)
@@ -517,8 +578,14 @@ class RadioClient:
         self.set_ptt_hotkeys(self.ptt_key, False)
         self.set_ptt_hotkeys(self.ptt_key, True)
         
-        
-# --- CLASSE DA JANELA DE CONFIGURAÇÃO TKINTER ---
+    # NOVO: Método de atualização da distância virtual
+    def update_loopback_distance(self, value):
+        self.loopback_distance_km = float(value)
+        self.config['loopback_distance_km'] = self.loopback_distance_km
+        save_config(self.config)
+
+
+# --- CLASSE DA JANELA DE CONFIGURAÇÃO TKINTER (Mantida) ---
 
 class RadioConfigWindow(tk.Toplevel):
     def __init__(self, master, client: RadioClient):
@@ -541,6 +608,9 @@ class RadioConfigWindow(tk.Toplevel):
         self.loopback_active_var = tk.BooleanVar(self, value=client.loopback_active)
         self.mic_volume_var = tk.DoubleVar(self, value=client.mic_volume_factor)
         self.rx_volume_var = tk.DoubleVar(self, value=client.rx_volume_factor)
+        
+        # NOVO: Variável para Distância Virtual
+        self.loopback_distance_var = tk.DoubleVar(self, value=client.loopback_distance_km)
         
         # Estilos (Usando o tema do Master)
         self.configure(bg=master.cget('bg'))
@@ -591,7 +661,7 @@ class RadioConfigWindow(tk.Toplevel):
         
         ttk.Separator(main_frame).pack(fill='x', pady=10)
 
-        # --- Seção 2: Volume e Loopback ---
+        # --- Seção 2: Volume e Loopback (MODIFICADA) ---
         ttk.Label(main_frame, text="Controles de Volume e PTT", font=('TkDefaultFont', 12, 'bold')).pack(anchor='w', pady=(0, 5))
         
         volume_frame = ttk.Frame(main_frame)
@@ -603,13 +673,21 @@ class RadioConfigWindow(tk.Toplevel):
         VolumeKnob(volume_frame, self.mic_volume_var, self._on_mic_volume_change, size=60).grid(row=1, column=0, padx=10, pady=5)
         
         # Volume RX
-        rx_label = ttk.Label(volume_frame, text="Volume RX:")
+        rx_label = ttk.Label(volume_frame, text="Volume RX (UI):")
         rx_label.grid(row=0, column=1, sticky='w', padx=10)
         VolumeKnob(volume_frame, self.rx_volume_var, self._on_rx_volume_change, size=60).grid(row=1, column=1, padx=10, pady=5)
         
-        # Loopback
-        ttk.Checkbutton(volume_frame, text="Monitorar Voz (Loopback)", variable=self.loopback_active_var, command=self._on_loopback_change).grid(row=2, column=0, columnspan=2, pady=10)
+        # Loopback Checkbutton
+        ttk.Checkbutton(volume_frame, text="Monitorar Voz (Loopback)", variable=self.loopback_active_var, command=self._on_loopback_change).grid(row=2, column=0, columnspan=2, pady=(10, 5), sticky='w')
 
+        # NOVO: Controle de Distância Virtual para Loopback
+        ttk.Label(volume_frame, text=f"Distância Virtual (km, Max: {MAX_RANGE_KM:.0f}):", anchor='w').grid(row=3, column=0, padx=5, pady=(5,0), sticky='w')
+        ttk.Scale(volume_frame, from_=0, to=MAX_RANGE_KM, orient='horizontal', variable=self.loopback_distance_var, command=self._on_loopback_distance_change, length=150, value=self.loopback_distance_var.get()).grid(row=4, column=0, padx=5, sticky='ew')
+        self.distance_value_label = ttk.Label(volume_frame, textvariable=self.loopback_distance_var, width=5)
+        self.distance_value_label.grid(row=4, column=1, padx=5, sticky='w')
+        self.loopback_distance_var.trace_add("write", lambda *args: self.distance_value_label.config(text=f"{self.loopback_distance_var.get():.1f} km")) # Atualiza label em tempo real
+        
+        volume_frame.columnconfigure(1, weight=1)
 
         ttk.Separator(main_frame).pack(fill='x', pady=10)
 
@@ -655,6 +733,11 @@ class RadioConfigWindow(tk.Toplevel):
         self.client.loopback_active = self.loopback_active_var.get()
         save_config(self.client.config)
 
+    def _on_loopback_distance_change(self, value):
+        """Callback para o ajuste da escala de distância."""
+        self.client.update_loopback_distance(value)
+        
+    # --- PTT Capture Logic (mantida) ---
     def _start_ptt_capture(self):
         # Desativa os hotkeys globais existentes (se for teclado)
         self.client.set_ptt_hotkeys(self.client.ptt_key, False)
@@ -691,20 +774,19 @@ class RadioConfigWindow(tk.Toplevel):
         if captured_key:
             new_key = captured_key.lower()
         else:
-            new_key = self.client.ptt_key
+            new_key = self.ptt_key
 
         # 1. Atualiza a configuração do cliente
         self.client.ptt_key = new_key
         self.client.config['ptt_key'] = new_key
         save_config(self.client.config)
         
-        # 2. Re-registra os hotkeys
+        # 3. Re-registra os hotkeys
         self.client.set_ptt_hotkeys(new_key, True)
         
-        # 3. Atualiza a UI
-        self.ptt_key_var.set(new_key.upper())
-        self.ptt_entry.config(state='readonly')
-        self.capture_button.config(state=tk.NORMAL)
+        # 4. Força a atualização da UI (o objeto da janela de configurações precisa ser atualizado)
+        # É uma simulação da chamada que o objeto RadioConfigWindow faria.
+        pass # A UI é atualizada diretamente pela janela de configurações, que está na thread principal.
 
 
     def _on_closing(self):
