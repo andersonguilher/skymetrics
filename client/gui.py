@@ -80,7 +80,9 @@ class MonitorFrame(ttk.Frame):
         
         self.data_vars = {
             "alt_ind": ttk.StringVar(value="0 ft"), "vs": ttk.StringVar(value="0 fpm"), "ias": ttk.StringVar(value="0 kts"), 
-            "agl": ttk.StringVar(value="0 ft"), "g_force": ttk.StringVar(value="1.0 g"), "fuel": ttk.StringVar(value="0 gal")
+            "agl": ttk.StringVar(value="0 ft"), "g_force": ttk.StringVar(value="1.0 g"), "fuel": ttk.StringVar(value="0 gal"),
+            "com1_active": ttk.StringVar(value="N/A MHz"), # NOVO
+            "com2_active": ttk.StringVar(value="N/A MHz")  # NOVO
         }
         
         ttk.Label(self, text=f"Monitor de Telemetria", font=("TkDefaultFont", 12, "bold")).pack(pady=(0, 10))
@@ -106,6 +108,11 @@ class MonitorFrame(ttk.Frame):
         self._create_data_row(data_frame, "G-FORCE:", "g_force", 4)
         self._create_data_row(data_frame, "TOTAL FUEL:", "fuel", 5)
         
+        ttk.Separator(self).pack(fill='x', pady=10) # Separator entre métricas e frequências
+        
+        self._create_data_row(data_frame, "COM1 ACTIVE:", "com1_active", 6) # NOVO
+        self._create_data_row(data_frame, "COM2 ACTIVE:", "com2_active", 7) # NOVO
+        
         ttk.Separator(self).pack(fill='x', pady=10)
         ttk.Button(self, text="Logoff", command=master._handle_logoff, bootstyle="danger-outline").pack(pady=(5, 0))
 
@@ -126,6 +133,10 @@ class MonitorFrame(ttk.Frame):
         self.data_vars["agl"].set(f"{int(data['agl']):,} ft".replace(',', '.'))
         self.data_vars["g_force"].set(f"{data['g_force']:.1f} g")
         self.data_vars["fuel"].set(f"{int(data['total_fuel']):,} gal".replace(',', '.'))
+        
+        # NOVO: Atualiza as frequências COM
+        self.data_vars["com1_active"].set(f"{data['com1_active']:.3f} MHz")
+        self.data_vars["com2_active"].set(f"{data['com2_active']:.3f} MHz")
         
         if self.vs_widget:
             if data['vs'] > 100:
