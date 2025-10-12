@@ -8,7 +8,7 @@ from datetime import datetime
 from threading import Lock
 
 # --- CONSTANTES DE LÓGICA DE VOO ---
-IAS_TAXI_START_KTS = 10        
+GS_TAXI_START_KTS = 10         # ALTERADO: Usando Ground Speed para eventos em solo
 ALERT_RATE_LIMIT_SECONDS = 60  
 SUBMIT_LOG_URL = "https://kafly.com.br/dash/utils/submit_flight_log.php"
 
@@ -83,26 +83,26 @@ class FlightEventLogger:
 
     def check_and_log_events(self, data: Dict[str, Any]):
         """Executa a detecção e o registro de todos os eventos de voo."""
-        current_agl = data.get('agl', 0); current_ias = data.get('ias', 0)
+        current_agl = data.get('agl', 0); current_gs = data.get('gs', 0) # ALTERADO: Lendo 'gs'
         current_vs = data.get('vs', 0); current_on_ground = data.get('on_ground', 0)
         current_bank = data.get('plane_bank_degrees', 0); eng_combustion = data.get('eng_combustion', 0)
         alerts = data.get('alerts', {})
 
         # A. INÍCIO DO VOO
-        if self.has_landed and not self.is_airborne and not self.initial_fuel_logged and eng_combustion == 1 and current_on_ground == 1 and current_ias >= IAS_TAXI_START_KTS:
-            self._log_event("INICIO_VOO", f"Início de taxi detectado.", data)
+        if self.has_landed and not self.is_airborne and not self.initial_fuel_logged and eng_combustion == 1 and current_on_ground == 1 and current_gs >= GS_TAXI_START_KTS: # ALTERADO: De current_ias para current_gs e IAS_TAXI_START_KTS para GS_TAXI_START_KTS
+            self._log_event("INICIO_VOO", f"Início de taxi detectado. GS >= {GS_TAXI_START_KTS} kts no solo.", data) # Texto atualizado
             self._log_event("COMBUSTIVEL_INICIAL", f"Motor ligado. Combustível: {format_number(data.get('total_fuel', 0), 0)} gal", data)
             self.initial_fuel_logged = True; self.has_landed = False; self.flight_ended = False
 
         # B. DECOLAGEM
-        if not self.is_airborne and self.initial_fuel_logged and current_agl > 50 and current_ias > 40:
+        if not self.is_airborne and self.initial_fuel_logged and current_agl > 50 and current_gs > 40: # ALTERADO: De current_ias para current_gs
             self.is_airborne = True; self.has_landed = False; self.flight_ended = False
             self._log_event("DECOLAGEM", "Decolagem detectada. Aeronave no ar.", data)
 
         # C. POUSO
         if self.is_airborne and current_on_ground == 1 and current_agl < 100 and not self.has_landed:
             if self.landing_vs is None: data['landing_vs'] = self.last_vs; self.landing_vs = self.last_vs
-            if current_ias < 10:
+            if current_gs < 10: # ALTERADO: De current_ias para current_gs
                 self.has_landed = True; self.is_airborne = False
                 vs_no_toque = self.landing_vs if self.landing_vs is not None else current_vs
                 data['landing_vs'] = vs_no_toque 
@@ -128,7 +128,7 @@ class FlightEventLogger:
             self.landing_vs = None; self.last_alert_timestamps = {}
             
         # H. POUSO RESET (Touch-and-Go)
-        if self.initial_fuel_logged and self.has_landed and current_on_ground == 1 and current_ias >= IAS_TAXI_START_KTS:
+        if self.initial_fuel_logged and self.has_landed and current_on_ground == 1 and current_gs >= GS_TAXI_START_KTS: # ALTERADO: De current_ias para current_gs e IAS_TAXI_START_KTS para GS_TAXI_START_KTS
             if self.event_log:
                 self._log_event("SEGMENTO_CONCLUIDO", "Segmento de voo anterior concluído (Touch-and-Go ou re-takeoff). Enviando logs acumulados.", data)
                 self.post_full_flight_log() 

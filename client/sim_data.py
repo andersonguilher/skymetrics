@@ -11,7 +11,7 @@ sm = None
 aq = None 
 
 DATA_PRECISION = { 
-    "alt_ind": 0, "vs": 0, "ias": 1, "tas": 1, "agl": 0, "on_ground": 0, 
+    "alt_ind": 0, "vs": 0, "ias": 1, "gs": 1, "tas": 1, "agl": 0, "on_ground": 0, # ALTERADO: Adicionado "gs" com precisão 1
     "total_fuel": 0, "gear_left_pos": 0, "g_force": 1, 
     "engine_count": 0, "lat": 3, "lng": 3, "eng_combustion": 0, 
     "light_beacon_on": 0, "light_landing_on": 0, "light_strobe_on": 0, 
@@ -19,7 +19,7 @@ DATA_PRECISION = {
 }
 
 flight_data: Dict[str, Any] = {
-    "alt_ind": 0, "vs": 0.0, "ias": 0, "tas": 0, "agl": 0, "on_ground": 0, "total_fuel": 0, 
+    "alt_ind": 0, "vs": 0.0, "ias": 0, "gs": 0.0, "tas": 0, "agl": 0, "on_ground": 0, "total_fuel": 0, # ALTERADO: Adicionado "gs"
     "gear_left_pos": 0, "g_force": 1.0, "engine_count": 0, "lat": 0.0, "lng": 0.0, 
     "eng_combustion": 0, "light_beacon_on": 0, "light_landing_on": 0, "light_strobe_on": 0, 
     "plane_bank_degrees": 0.0, "engine_vibration_1": 0.0,
@@ -43,6 +43,7 @@ class MockAircraftRequests:
         if var == "PLANE_LONGITUDE": return -46.6333
         if var == "PLANE_ALTITUDE": return 10000 if t > 10 else 0
         if var == "AIRSPEED_INDICATED": return 215 if t > 10 else 0
+        if var == "GPS_GROUND_SPEED": return 250 if t > 10 else (12 if t > 5 and t < 15 and t % 60 > 50 else 0) # NOVO: Mock para GPS_GROUND_SPEED
         if var == "SIM_ON_GROUND": return 1 if t < 20 or t % 60 > 50 else 0
         if var == "GENERAL_ENG_COMBUSTION:1": return 1 if t > 5 else 0
         if var == "G_FORCE": return 1.0 + 0.1 * random.random()
@@ -81,6 +82,7 @@ def fetch_all_data():
     # Coleta de Dados Primários (restante)
     flight_data["alt_ind"] = get_safe_value("PLANE_ALTITUDE")
     flight_data["ias"] = get_safe_value("AIRSPEED_INDICATED")
+    flight_data["gs"] = get_safe_value("GPS_GROUND_SPEED", default=0.0) # NOVO: Coleta de Ground Speed
     flight_data["tas"] = get_safe_value("AIRSPEED_TRUE")
     flight_data["agl"] = get_safe_value("PLANE_ALT_ABOVE_GROUND")
     flight_data["on_ground"] = get_safe_value("SIM_ON_GROUND")
