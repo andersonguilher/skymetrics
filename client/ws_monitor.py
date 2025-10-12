@@ -11,9 +11,9 @@ import requests
 import sys # Importa sys para checar módulos
 
 # Importações de módulos locais 
-from .event_logic import FlightEventLogger 
-from .sim_data import fetch_all_data, create_rounded_data, has_significant_change, flight_data, sm, CONN_STATUS
-from .radio_ui_logic import RadioClient # Importa a classe, mas trata falha na inicialização
+from event_logic import FlightEventLogger 
+from sim_data import fetch_all_data, create_rounded_data, has_significant_change, flight_data, sm, CONN_STATUS
+from radio_ui_logic import RadioClient # Importa a classe, mas trata falha na inicialização
 
 
 # CONSTANTES (Portadas do node_server/config.js)
@@ -49,6 +49,7 @@ def _fetch_network_flight_plan(vatsim_id: str, ivao_id: str) -> Dict[str, str]:
 
 class FlightMonitor:
     def __init__(self, pilot_email: str, display_name: str, pilot_data: Dict[str, Any], master_app, websocket_url: str, heartbeat_interval: int):
+        super().__init__()
         self.pilot_email = pilot_email
         self.display_name = display_name 
         self.vatsim_id = pilot_data.get('vatsim_id', 'N/A')
@@ -71,21 +72,17 @@ class FlightMonitor:
         self.radio_client: RadioClient | None = None
         self.last_tuned_freq: str = "N/A" 
         
-        self.conn_thread: threading.Thread | None = None  # NOVO: Referência à thread de conexão
-        self.data_thread: threading.Thread | None = None  # NOVO: Referência à thread de dados
+        self.conn_thread: threading.Thread | None = None
+        self.data_thread: threading.Thread | None = None
 
 
     def start_monitor(self):
         """
         Inicia a thread de gerenciamento de conexão e reconexão.
-        A inicialização do rádio foi movida para _send_data_loop.
         """
         global flight_data
         
         flight_data["pilot_name"] = self.display_name
-        
-        # REMOVIDA A LÓGICA DE INICIALIZAÇÃO DO RÁDIO.
-        # Agora ela ocorrerá no _send_data_loop quando o CONN_STATUS for REAL.
         
         self.conn_thread = threading.Thread(target=self._connection_management_loop, daemon=True)
         self.conn_thread.start()
@@ -103,7 +100,7 @@ class FlightMonitor:
              self.radio_client.disconnect()
         
         # 3. Espera as threads de fundo
-        TIMEOUT = 1.0 # Aumentado para 1.0s para dar tempo de limpeza
+        TIMEOUT = 1.0 
         
         # Espera a thread de dados
         if self.data_thread and self.data_thread.is_alive():
@@ -122,7 +119,7 @@ class FlightMonitor:
             except: 
                 pass
             sm = None
-            CONN_STATUS = "SIMULADO" # Garante o reset do status
+            CONN_STATUS = "SIMULADO" 
 
     def _connection_management_loop(self):
         RETRY_DELAY = 5 
@@ -163,7 +160,7 @@ class FlightMonitor:
         })
         ws.send(initial_payload)
         
-        self.data_thread = threading.Thread(target=self._send_data_loop, daemon=True) # ARMAZENA A THREAD
+        self.data_thread = threading.Thread(target=self._send_data_loop, daemon=True)
         self.data_thread.start()
 
     def _on_error(self, ws, error): 
@@ -208,9 +205,9 @@ class FlightMonitor:
                     if self.radio_client is None:
                          # Tenta inicializar o rádio se SimConnect estiver REAL e o rádio INATIVO
                          try:
-                             from .radio_ui_logic import RadioClient 
                              print(f"[{datetime.now().strftime('%H:%M:%S')}] [RÁDIO INFO] SimConnect REAL detectado. Tentando instanciar RadioClient...")
-                             self.radio_client = RadioClient()
+                             # REVERTIDO: Chamada sem argumento
+                             self.radio_client = RadioClient() 
                              self.radio_client.connect()
                              print(f"[{datetime.now().strftime('%H:%M:%S')}] [RÁDIO INFO] Cliente de rádio inicializado e conectando automaticamente.")
                          except Exception as e:

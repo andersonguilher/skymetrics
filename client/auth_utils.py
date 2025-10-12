@@ -3,7 +3,7 @@
 import requests
 import configparser
 import keyring 
-import os # NOVO: Importar 'os'
+import os
 from typing import Dict, Any, Tuple
 
 CONFIG_FILE = 'client_config.ini'
@@ -11,11 +11,14 @@ CLIENT_CONFIG_SECTION = 'CLIENT_CONFIG'
 CLIENT_LOGIN_SECTION = 'LOGIN_CREDENTIALS'
 
 def _get_absolute_config_path(config_file: str) -> str:
-    """Retorna o caminho absoluto do arquivo de configuração, baseado no diretório deste script."""
-    # os.path.abspath(__file__) é o caminho completo para auth_utils.py
-    # os.path.dirname(...) pega o diretório (i.e., '.../client')
-    # os.path.join(...) junta o diretório com o nome do arquivo (i.e., '.../client/client_config.ini')
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), config_file)
+    """
+    Retorna o caminho absoluto para o arquivo de configuração.
+    Assume que config_file está NO DIRETÓRIO RAIZ do projeto,
+    que é o PAI do diretório 'client'.
+    """
+    # Obtém o caminho do diretório pai (a raiz do projeto)
+    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(parent_dir, config_file) 
 
 
 def _get_config_globals(config_file: str) -> Tuple[str, str, str, str, str, configparser.ConfigParser]:

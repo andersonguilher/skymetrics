@@ -24,7 +24,7 @@ try:
     from pygame import locals
     
     # 2. Importação do módulo local DSP (deve estar no diretório 'client/')
-    from . import radio_dsp as dsp_module
+    import radio_dsp as dsp_module  # CORRIGIDO para importação direta
     radio_dsp = dsp_module 
     
     # 3. Inicialização de recursos (Pygame)

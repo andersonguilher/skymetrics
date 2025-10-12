@@ -12,13 +12,36 @@ import time
 from tkinter import messagebox 
 
 
-# IMPORTAÇÕES CORRIGIDAS (AGORA RELATIVAS PARA PYTHON -M)
-from .sim_data import CONN_STATUS, sm
-from .auth_utils import load_credentials, save_credentials, delete_credentials, check_login, get_validated_pilot_data
-from .update_logic import check_for_update_sync, DECISION_PROCEED_TO_LOGIN, DECISION_INITIATE_UPDATE
-from .ws_monitor import FlightMonitor
-from .gui import LoginFormFrame, MonitorFrame
-from .radio_ui_logic import RadioConfigWindow, RadioClient # NOVO: Importa a lógica e UI do Rádio
+# --- CORREÇÃO FINAL DE IMPORTAÇÃO PARA AMBIENTE DE TESTES ---
+# A chave é adicionar o diretório PAI do 'client' para tratar 'client' como um pacote em ambientes específicos.
+if not getattr(sys, 'frozen', False):
+    # Obtém o diretório PARENT (onde fica 'client' e 'node_server').
+    # __file__ -> '.../client/main.py'
+    # os.path.dirname(__file__) -> '.../client'
+    # os.path.dirname(os.path.dirname(__file__)) -> '.../' (a pasta raiz do projeto)
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    
+    # Adiciona a raiz do projeto ao sys.path, permitindo que 'client' seja tratado como um módulo de topo.
+    if project_root not in sys.path:
+        sys.path.append(project_root)
+        
+    # Quando rodando com 'python -m client.main', o sys.path já está modificado
+    # pelo -m. Se a sintaxe for quebrada, a injeção falha. Vamos tentar uma última vez
+    # a injeção direta no caso de teste.
+    # Esta linha é redundante no PyInstaller, mas é uma defesa extra para testes.
+    client_dir = os.path.dirname(os.path.abspath(__file__))
+    if client_dir not in sys.path:
+        sys.path.append(client_dir)
+# --------------------------------------------------------------------------------
+
+
+# IMPORTAÇÕES DIRETAS (A sintaxe para módulos internos permanece a mesma para PyInstaller)
+from sim_data import CONN_STATUS, sm
+from auth_utils import load_credentials, save_credentials, delete_credentials, check_login, get_validated_pilot_data
+from update_logic import check_for_update_sync, DECISION_PROCEED_TO_LOGIN, DECISION_INITIATE_UPDATE
+from ws_monitor import FlightMonitor
+from gui import LoginFormFrame, MonitorFrame
+from radio_ui_logic import RadioConfigWindow, RadioClient 
 
 
 # =================================================================
@@ -27,7 +50,7 @@ from .radio_ui_logic import RadioConfigWindow, RadioClient # NOVO: Importa a ló
 CONFIG_FILE = 'client_config.ini'
 CLIENT_CONFIG_SECTION = 'CLIENT_CONFIG' 
 CLIENT_LOGIN_SECTION = 'LOGIN_CREDENTIALS'
-CURRENT_VERSION = "1.0.3" 
+CURRENT_VERSION = "1.0.5" 
 UPDATE_EXECUTABLE_NAME = "updater.exe" 
 
 config = configparser.ConfigParser()
@@ -84,7 +107,7 @@ class MainApplication(ttk.Window):
         self.tray_icon: pystray.Icon | None = None
         self.minimized_to_tray = False
         
-        self.radio_config_window: RadioConfigWindow | None = None # NOVO: Referência à janela de config
+        self.radio_config_window: RadioConfigWindow | None = None
         
         self._center_window()
         threading.Thread(target=self._initial_flow_thread, daemon=True).start()
@@ -157,7 +180,7 @@ class MainApplication(ttk.Window):
             print("[DIAG] Tentando criar RadioClient temporário para configuração.")
             try:
                 # Importa a classe DENTRO do método para evitar falha no __init__ do MainApplication
-                from .radio_ui_logic import RadioClient 
+                from radio_ui_logic import RadioClient 
                 target_radio_client = RadioClient()
             except Exception as e:
                 # Falha ao instanciar o RadioClient devido a dependências ausentes (o caso original do usuário)
@@ -247,6 +270,7 @@ class MainApplication(ttk.Window):
              self.monitor.radio_client.disconnect()
              
         self.stop_monitor_and_simconnect()
+        # A linha de exclusão de credenciais (delete_credentials) DEVE ESTAR AUSENTE AQUI.
         self.destroy()
 
     def _show_login_form(self):
@@ -282,7 +306,6 @@ class MainApplication(ttk.Window):
              self.monitor.radio_client.disconnect()
              
         self.stop_monitor_and_simconnect()
-        if self.current_pilot_email: delete_credentials(self.current_pilot_email, clear_email=False, config_file=CONFIG_FILE)
         self.deiconify(); self._show_login_form()
 
 
