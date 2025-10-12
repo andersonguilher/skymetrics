@@ -8,3 +8,4 @@ node_server/node_modules/
 install_output/Skymetrics-1.0-setup.exe
 updater.spec
 Setupt.iss
+client_config.json
