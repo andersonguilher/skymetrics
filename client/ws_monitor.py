@@ -7,10 +7,48 @@ import time
 from datetime import datetime
 from tkinter import messagebox
 from typing import Dict, Any
+import requests 
 
 # Importações de módulos locais CORRIGIDAS (devem ser relativas)
 from .event_logic import FlightEventLogger 
 from .sim_data import fetch_all_data, create_rounded_data, has_significant_change, flight_data, sm, CONN_STATUS
+
+
+# CONSTANTES (Portadas do node_server/config.js)
+IVAO_DATA_URL = "https://api.ivao.aero/v2/tracker/whazzup" 
+VATSIM_DATA_URL = "https://data.vatsim.net/v3/vatsim-data.json"
+# -----------------------------
+
+def _fetch_network_flight_plan(vatsim_id: str, ivao_id: str) -> Dict[str, str]:
+    """Busca o plano de voo (DEP/ARR) nas redes VATSIM ou IVAO, priorizando o IVAO."""
+    flight_plan = {"departureId": "N/A", "arrivalId": "N/A", "networkUserId": "N/A"}
+    
+    # 1. Tenta IVAO
+    if ivao_id and ivao_id.upper() not in ('N/A', '', '0'):
+        try:
+            # Não é estritamente necessário ignorar SSL aqui se a URL usa HTTPS padrão, mas é mantido como prática segura
+            response = requests.get(IVAO_DATA_URL, timeout=8, verify=False)
+            response.raise_for_status()
+            data = response.json()
+            # Certifique-se de que o ID de rede é um número para comparação
+            ivao_id_int = int(ivao_id.strip())
+            
+            for client in data.get('clients', {}).get('pilots', []):
+                if client.get('userId') == ivao_id_int and client.get('flightPlan'):
+                    fp = client['flightPlan']
+                    # Limpa e coloca em maiúsculas
+                    flight_plan["departureId"] = fp.get('departureId', "N/A").strip().upper()
+                    flight_plan["arrivalId"] = fp.get('arrivalId', "N/A").strip().upper()
+                    flight_plan["networkUserId"] = ivao_id # CHAVE: Usa o ID de rede real
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [IVAO FETCH] Sucesso. DEP: {flight_plan['departureId']}, ARR: {flight_plan['arrivalId']}")
+                    return flight_plan
+        except Exception as e:
+            # Adicionado log de erro para diagnóstico
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] [IVAO FETCH] Erro ao buscar plano IVAO: {e}")
+
+    # (Lógica para VATSIM omitida/simples por prioridade de IVAO e complexidade de dados VATSIM v3)
+    
+    return flight_plan
 
 
 class FlightMonitor:
@@ -31,7 +69,8 @@ class FlightMonitor:
         self.websocket_url = websocket_url
         self.heartbeat_interval = heartbeat_interval
         
-        self.event_logger = FlightEventLogger(display_name, pilot_data)
+        self.event_logger: FlightEventLogger | None = None
+        self.pilot_data = pilot_data # Armazena para uso posterior
 
 
     def start_monitor(self):
@@ -65,10 +104,27 @@ class FlightMonitor:
 
     def _on_open(self, ws):
         """Envia o pacote de identificação e inicia o loop de envio."""
+        
+        # CHAVE: Busca o plano de voo
+        flight_plan = _fetch_network_flight_plan(self.vatsim_id, self.ivao_id)
+        
+        # Atualiza o pilot_data que será usado pelo FlightEventLogger
+        self.pilot_data['departureId'] = flight_plan['departureId']
+        self.pilot_data['arrivalId'] = flight_plan['arrivalId']
+        
+        # NOVO: Injeta o ID de rede real encontrado para ser priorizado no log de eventos
+        self.pilot_data['actual_network_id'] = flight_plan['networkUserId'] 
+        
+        # Inicializa o logger com os IDs atualizados
+        if self.event_logger is None:
+             self.event_logger = FlightEventLogger(self.display_name, self.pilot_data)
+
         initial_payload = json.dumps({
             "pilot_name": self.display_name, 
             "vatsim_id": self.vatsim_id, 
             "ivao_id": self.ivao_id,
+            "departureId": flight_plan['departureId'], 
+            "arrivalId": flight_plan['arrivalId'],     
             "packets_sent": 0, 
             "mb_sent": 0.0
         })
@@ -110,7 +166,9 @@ class FlightMonitor:
                 fetch_all_data()
                 current_rounded = create_rounded_data(flight_data)
                 
-                self.event_logger.check_and_log_events(current_rounded) 
+                # Assume que self.event_logger está inicializado em _on_open
+                if self.event_logger:
+                    self.event_logger.check_and_log_events(current_rounded) 
 
                 force_send = (time.time() - self.last_send_time) >= self.heartbeat_interval
 
@@ -140,7 +198,8 @@ class FlightMonitor:
                     self.master_app.after(0, self.master_app.current_frame.update_sim_status, f"{CONN_STATUS} (FALHA)")
 
                     last_data = current_rounded if 'current_rounded' in locals() else flight_data
-                    self.event_logger.handle_session_end(last_data)
+                    if self.event_logger:
+                        self.event_logger.handle_session_end(last_data)
 
                     if sm: 
                         try: sm.exit(); sm = None 

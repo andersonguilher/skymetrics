@@ -8,9 +8,9 @@ from datetime import datetime
 from threading import Lock
 
 # --- CONSTANTES DE LÓGICA DE VOO ---
-GS_TAXI_START_KTS = 10         # ALTERADO: Usando Ground Speed para eventos em solo
+GS_TAXI_START_KTS = 10         # ALTERADO: Usando Ground Speed para eventos em solo 
 ALERT_RATE_LIMIT_SECONDS = 60  
-SUBMIT_LOG_URL = "https://kafly.com.br/dash/utils/submit_flight_log.php"
+SUBMIT_LOG_URL = "https://kafly.com.br/dash/utils/submit_flight_log.php" 
 
 def format_number(value, decimals):
     """Formata um número para string com separador de milhares para logs."""
@@ -23,7 +23,17 @@ def format_number(value, decimals):
 class FlightEventLogger:
     def __init__(self, pilot_name: str, pilot_data: Dict[str, Any]):
         self.pilot_name = pilot_name
-        self.log_user_id = pilot_data.get('vatsim_id') if pilot_data.get('vatsim_id') not in ('', 'N/A') else pilot_data.get('ivao_id', 'N/A')
+        
+        # CORREÇÃO: Lógica para determinar o log_user_id
+        self.log_user_id = pilot_data.get('actual_network_id') # 1. Prioriza o ID real encontrado na rede
+        
+        # 2. Se o ID de rede não foi encontrado (é N/A, "", ou None), usa o ID VA prioritário
+        if self.log_user_id in ('N/A', '', None):
+            self.log_user_id = pilot_data.get('vatsim_id') if pilot_data.get('vatsim_id') not in ('', 'N/A') else pilot_data.get('ivao_id', 'N/A')
+        
+        # Garante que seja string
+        self.log_user_id = str(self.log_user_id)
+        
         self.log_lock = Lock()
         
         self.is_airborne = False
@@ -35,8 +45,8 @@ class FlightEventLogger:
         self.event_log: List[Dict[str, Any]] = []
         self.last_alert_timestamps: Dict[str, float] = {}
 
-        self.departure_id = pilot_data.get('departureId', pilot_name[:4]).upper()
-        self.arrival_id = pilot_data.get('arrivalId', pilot_name[-4:]).upper()
+        self.departure_id = pilot_data.get('departureId', 'N/A').upper()
+        self.arrival_id = pilot_data.get('arrivalId', 'N/A').upper()
 
         self._log_event("INICIO_SESSAO", f"Sessão de telemetria iniciada. DEP: {self.departure_id}, ARR: {self.arrival_id}. (Usando ID de Rede {self.log_user_id})", {})
         
@@ -83,26 +93,26 @@ class FlightEventLogger:
 
     def check_and_log_events(self, data: Dict[str, Any]):
         """Executa a detecção e o registro de todos os eventos de voo."""
-        current_agl = data.get('agl', 0); current_gs = data.get('gs', 0) # ALTERADO: Lendo 'gs'
+        current_agl = data.get('agl', 0); current_gs = data.get('gs', 0) 
         current_vs = data.get('vs', 0); current_on_ground = data.get('on_ground', 0)
         current_bank = data.get('plane_bank_degrees', 0); eng_combustion = data.get('eng_combustion', 0)
         alerts = data.get('alerts', {})
 
         # A. INÍCIO DO VOO
-        if self.has_landed and not self.is_airborne and not self.initial_fuel_logged and eng_combustion == 1 and current_on_ground == 1 and current_gs >= GS_TAXI_START_KTS: # ALTERADO: De current_ias para current_gs e IAS_TAXI_START_KTS para GS_TAXI_START_KTS
-            self._log_event("INICIO_VOO", f"Início de taxi detectado. GS >= {GS_TAXI_START_KTS} kts no solo.", data) # Texto atualizado
+        if self.has_landed and not self.is_airborne and not self.initial_fuel_logged and eng_combustion == 1 and current_on_ground == 1 and current_gs >= GS_TAXI_START_KTS: 
+            self._log_event("INICIO_VOO", f"Início de taxi detectado. GS >= {GS_TAXI_START_KTS} kts no solo.", data) 
             self._log_event("COMBUSTIVEL_INICIAL", f"Motor ligado. Combustível: {format_number(data.get('total_fuel', 0), 0)} gal", data)
             self.initial_fuel_logged = True; self.has_landed = False; self.flight_ended = False
 
         # B. DECOLAGEM
-        if not self.is_airborne and self.initial_fuel_logged and current_agl > 50 and current_gs > 40: # ALTERADO: De current_ias para current_gs
+        if not self.is_airborne and self.initial_fuel_logged and current_agl > 50 and current_gs > 40: 
             self.is_airborne = True; self.has_landed = False; self.flight_ended = False
             self._log_event("DECOLAGEM", "Decolagem detectada. Aeronave no ar.", data)
 
         # C. POUSO
         if self.is_airborne and current_on_ground == 1 and current_agl < 100 and not self.has_landed:
             if self.landing_vs is None: data['landing_vs'] = self.last_vs; self.landing_vs = self.last_vs
-            if current_gs < 10: # ALTERADO: De current_ias para current_gs
+            if current_gs < 10: 
                 self.has_landed = True; self.is_airborne = False
                 vs_no_toque = self.landing_vs if self.landing_vs is not None else current_vs
                 data['landing_vs'] = vs_no_toque 
@@ -128,7 +138,7 @@ class FlightEventLogger:
             self.landing_vs = None; self.last_alert_timestamps = {}
             
         # H. POUSO RESET (Touch-and-Go)
-        if self.initial_fuel_logged and self.has_landed and current_on_ground == 1 and current_gs >= GS_TAXI_START_KTS: # ALTERADO: De current_ias para current_gs e IAS_TAXI_START_KTS para GS_TAXI_START_KTS
+        if self.initial_fuel_logged and self.has_landed and current_on_ground == 1 and current_gs >= GS_TAXI_START_KTS: 
             if self.event_log:
                 self._log_event("SEGMENTO_CONCLUIDO", "Segmento de voo anterior concluído (Touch-and-Go ou re-takeoff). Enviando logs acumulados.", data)
                 self.post_full_flight_log() 
@@ -145,23 +155,45 @@ class FlightEventLogger:
         with self.log_lock: log_copy = self.event_log[:]
         if not log_copy: return
 
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [LOG SUBMIT] Tentativa de envio de {len(log_copy)} eventos para o piloto {self.pilot_name}...")
+
         for attempt in range(1, MAX_RETRIES + 1):
             all_events_succeeded = True
             for log_entry in log_copy:
+                event_name = log_entry.get('evento', 'N/A')
                 try:
+                    # Envia a requisição
                     response = requests.post(SUBMIT_LOG_URL, data=log_entry, timeout=5)
                     response_json = response.json()
+                    
                     if response.status_code != 200 or response_json.get('status') in ['error', 'not_found']:
+                        # Falha Lógica ou HTTP
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] [LOG SUBMIT] Falha no evento {event_name}. Resposta: {response.status_code} / {response_json.get('message', 'Erro desconhecido')}")
                         all_events_succeeded = False; break 
-                except requests.exceptions.RequestException:
+                    else:
+                        # Sucesso Individual
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] [LOG SUBMIT] Evento {event_name} enviado com sucesso. Resposta: {response_json.get('message', 'OK')}")
+
+                except requests.exceptions.RequestException as e:
+                    # Erro de Conexão/Timeout
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [LOG SUBMIT] ERRO DE CONEXÃO ao enviar evento {event_name}: {e}")
                     all_events_succeeded = False; break 
                 except json.JSONDecodeError:
+                    # Erro de JSON (Resposta inválida)
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [LOG SUBMIT] ERRO DE JSON (Resposta inválida do PHP) ao enviar evento {event_name}.")
                     all_events_succeeded = False; break
             
             if all_events_succeeded:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] [LOG SUBMIT] Envio em lote concluído com SUCESSO na tentativa {attempt}.")
                 with self.log_lock: self.event_log = []
                 return
-            if attempt < MAX_RETRIES: time.sleep(RETRY_DELAY_MS / 1000)
+            
+            if attempt < MAX_RETRIES: 
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] [LOG SUBMIT] Tentativa {attempt} falhou. Aguardando {RETRY_DELAY_MS / 1000}s antes da próxima retentativa...")
+                time.sleep(RETRY_DELAY_MS / 1000)
+            else:
+                # FALHA CRÍTICA
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] [LOG SUBMIT] FALHA CRÍTICA: O envio falhou após {MAX_RETRIES} tentativas. O log foi perdido.")
 
     def handle_session_end(self, data: Dict[str, Any]):
         """Chamado no encerramento do cliente."""
