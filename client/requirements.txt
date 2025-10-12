@@ -1,3 +1,6 @@
+# Arquivo: client/requirements.txt
+
+# Dependências do Skymetrics
 ttkbootstrap
 SimConnect
 requests
@@ -6,3 +9,11 @@ configparser
 websocket-client
 pystray
 Pillow
+# Dependências do Rádio
+pyaudio
+python-socketio
+python-engineio
+scipy
+keyboard
+pygame
+numpy

@@ -9,6 +9,8 @@ import threading
 from typing import Dict, Any
 from subprocess import Popen 
 import time
+from tkinter import messagebox # NOVO: Importa messagebox para exibir erros na UI
+
 
 # IMPORTAÇÕES CORRIGIDAS (AGORA RELATIVAS PARA PYTHON -M)
 from .sim_data import CONN_STATUS, sm
@@ -16,6 +18,7 @@ from .auth_utils import load_credentials, save_credentials, delete_credentials, 
 from .update_logic import check_for_update_sync, DECISION_PROCEED_TO_LOGIN, DECISION_INITIATE_UPDATE
 from .ws_monitor import FlightMonitor
 from .gui import LoginFormFrame, MonitorFrame
+from .radio_ui_logic import RadioConfigWindow, RadioClient # NOVO: Importa a lógica e UI do Rádio
 
 
 # =================================================================
@@ -59,13 +62,15 @@ try:
     PYSTRAY_AVAILABLE = True
 except ImportError:
     PYSTRAY_AVAILABLE = False
+except Exception:
+    PYSTRAY_AVAILABLE = False
 
 
 class MainApplication(ttk.Window):
     def __init__(self):
         super().__init__(themename="darkly")
         self.title(f"Monitor de Voo - Inicializando...")
-        self.geometry("300x480"); self.resizable(False, False)
+        self.geometry("350x550"); self.resizable(False, False)
         self._update_in_progress = False; self.current_version = CURRENT_VERSION
         
         try: self.iconbitmap(ICON_PATH)
@@ -78,6 +83,8 @@ class MainApplication(ttk.Window):
         
         self.tray_icon: pystray.Icon | None = None
         self.minimized_to_tray = False
+        
+        self.radio_config_window: RadioConfigWindow | None = None # NOVO: Referência à janela de config
         
         self._center_window()
         threading.Thread(target=self._initial_flow_thread, daemon=True).start()
@@ -124,6 +131,34 @@ class MainApplication(ttk.Window):
             'save': lambda e, p: save_credentials(e, p, CONFIG_FILE),
             'delete': lambda e, c=True: delete_credentials(e, c, CONFIG_FILE),
         }
+
+    # --- LÓGICA RÁDIO CONFIGURAÇÃO ---
+    def _show_radio_config_window(self):
+        """Abre a janela de configuração do rádio, garantindo que apenas uma esteja ativa."""
+        # DIAGNÓSTICO 1: Confirma que o botão foi clicado
+        print("[DIAG] Tentativa de abrir RadioConfigWindow...") 
+        
+        if self.radio_config_window and self.radio_config_window.winfo_exists():
+            self.radio_config_window.lift()
+        elif self.monitor and self.monitor.radio_client:
+            # DIAGNÓSTICO 2: Confirma que o objeto RadioClient existe e é válido
+            print(f"[DIAG] RadioClient válido: {self.monitor.radio_client}")
+            try:
+                self.radio_config_window = RadioConfigWindow(self, self.monitor.radio_client)
+            except Exception as e:
+                # CHAVE: Exibe o erro para o usuário
+                messagebox.showerror("Erro ao Abrir Configurações do Rádio", 
+                                     f"Falha ao iniciar a janela de configurações: {e}. Verifique as dependências (pyaudio, socketio, pygame, etc.) e se o PTT/Dispositivos estão configurados corretamente.")
+                self.radio_config_window = None # Limpa a referência da instância corrompida
+        else:
+            # DIAGNÓSTICO 3: Confirma se o monitor/cliente de rádio falhou na inicialização (self.monitor.radio_client é None)
+            messagebox.showerror("Erro de Inicialização do Rádio", "O cliente de rádio não foi inicializado corretamente. Verifique se as dependências (PyAudio, SocketIO) foram instaladas.")
+            print("[DIAG] Falha na inicialização: self.monitor.radio_client é None.")
+            
+    def _on_radio_config_closing(self):
+        """Callback de fechamento da janela de rádio para atualizar o estado do cliente."""
+        if self.monitor and self.monitor.radio_client:
+            self.monitor.radio_client.update_audio_streams() # Re-inicia os streams com novos dispositivos, se necessário
 
     # --- LÓGICA DA BANDEJA ---
     def _show_window_from_tray(self, icon: pystray.Icon, item: pystray.MenuItem):
@@ -180,6 +215,10 @@ class MainApplication(ttk.Window):
         if self.monitor and self.monitor.event_logger:
              last_data = self.monitor.last_sent_data if self.monitor.last_sent_data else {}
              self.monitor.event_logger.handle_session_end(last_data)
+        # NOVO: Chamada para desconexão do rádio
+        if self.monitor and self.monitor.radio_client:
+             self.monitor.radio_client.disconnect()
+             
         self.stop_monitor_and_simconnect()
         self.destroy()
 
@@ -198,7 +237,7 @@ class MainApplication(ttk.Window):
     def _on_login_success(self, email: str, password: str, display_name: str, pilot_data: Dict[str, Any]):
         if self.current_frame: self.current_frame.destroy()
         self.current_pilot_email = email
-        self.geometry("350x380"); self.resizable(False, False); self._center_window()
+        self.geometry("350x550"); self.resizable(False, False); self._center_window()
         self.title(f"Monitor de Voo {VA_KEY} - Piloto: {display_name}")
         self.monitor = FlightMonitor(email, display_name, pilot_data, self, WEBSOCKET_URL, HEARTBEAT_INTERVAL)
         self.monitor.start_monitor()
@@ -211,6 +250,10 @@ class MainApplication(ttk.Window):
         if self.monitor and self.monitor.event_logger:
              last_data = self.monitor.last_sent_data if self.monitor.last_sent_data else {}
              self.monitor.event_logger.handle_session_end(last_data)
+        # NOVO: Desconexão do rádio no logoff
+        if self.monitor and self.monitor.radio_client:
+             self.monitor.radio_client.disconnect()
+             
         self.stop_monitor_and_simconnect()
         if self.current_pilot_email: delete_credentials(self.current_pilot_email, clear_email=False, config_file=CONFIG_FILE)
         self.deiconify(); self._show_login_form()

@@ -8,10 +8,12 @@ from datetime import datetime
 from tkinter import messagebox
 from typing import Dict, Any
 import requests 
+import sys # Importa sys para checar módulos
 
-# Importações de módulos locais CORRIGIDAS (devem ser relativas)
+# Importações de módulos locais 
 from .event_logic import FlightEventLogger 
 from .sim_data import fetch_all_data, create_rounded_data, has_significant_change, flight_data, sm, CONN_STATUS
+from .radio_ui_logic import RadioClient # Importa a classe, mas trata falha na inicialização
 
 
 # CONSTANTES (Portadas do node_server/config.js)
@@ -26,28 +28,22 @@ def _fetch_network_flight_plan(vatsim_id: str, ivao_id: str) -> Dict[str, str]:
     # 1. Tenta IVAO
     if ivao_id and ivao_id.upper() not in ('N/A', '', '0'):
         try:
-            # Não é estritamente necessário ignorar SSL aqui se a URL usa HTTPS padrão, mas é mantido como prática segura
             response = requests.get(IVAO_DATA_URL, timeout=8, verify=False)
             response.raise_for_status()
             data = response.json()
-            # Certifique-se de que o ID de rede é um número para comparação
             ivao_id_int = int(ivao_id.strip())
             
             for client in data.get('clients', {}).get('pilots', []):
                 if client.get('userId') == ivao_id_int and client.get('flightPlan'):
                     fp = client['flightPlan']
-                    # Limpa e coloca em maiúsculas
                     flight_plan["departureId"] = fp.get('departureId', "N/A").strip().upper()
                     flight_plan["arrivalId"] = fp.get('arrivalId', "N/A").strip().upper()
-                    flight_plan["networkUserId"] = ivao_id # CHAVE: Usa o ID de rede real
+                    flight_plan["networkUserId"] = ivao_id
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] [IVAO FETCH] Sucesso. DEP: {flight_plan['departureId']}, ARR: {flight_plan['arrivalId']}")
                     return flight_plan
         except Exception as e:
-            # Adicionado log de erro para diagnóstico
             print(f"[{datetime.now().strftime('%H:%M:%S')}] [IVAO FETCH] Erro ao buscar plano IVAO: {e}")
 
-    # (Lógica para VATSIM omitida/simples por prioridade de IVAO e complexidade de dados VATSIM v3)
-    
     return flight_plan
 
 
@@ -70,7 +66,10 @@ class FlightMonitor:
         self.heartbeat_interval = heartbeat_interval
         
         self.event_logger: FlightEventLogger | None = None
-        self.pilot_data = pilot_data # Armazena para uso posterior
+        self.pilot_data = pilot_data 
+        
+        self.radio_client: RadioClient | None = None
+        self.last_tuned_freq: str = "N/A" # Adicionado para evitar sintonização redundante
 
 
     def start_monitor(self):
@@ -79,6 +78,20 @@ class FlightMonitor:
         
         flight_data["pilot_name"] = self.display_name
         
+        # NOVO: Inicia o cliente de rádio de forma robusta
+        try:
+             # Importa a classe localmente para tratamento de erro
+             from .radio_ui_logic import RadioClient 
+             print("[DIAG:RC] Tentando instanciar RadioClient...") # NOVO DIAG
+             self.radio_client = RadioClient()
+             print("[DIAG:RC] RadioClient instanciado. Tentando conectar...") # NOVO DIAG
+             self.radio_client.connect()
+             print("[RÁDIO INFO] Cliente de rádio inicializado e conectando.")
+        except Exception as e:
+             # Se houver qualquer erro (e.g., PyAudio falhando na inicialização do stream), ele será impresso
+             print(f"[RÁDIO CRÍTICO] Falha ao instanciar/conectar RadioClient: {e}. O rádio está desativado.")
+             self.radio_client = None
+             
         threading.Thread(target=self._connection_management_loop, daemon=True).start()
         
     def stop(self):
@@ -86,6 +99,10 @@ class FlightMonitor:
         self.running = False
         if self.ws_client:
             self.ws_client.close()
+        
+        if self.radio_client:
+             self.radio_client.disconnect()
+
 
     def _connection_management_loop(self):
         RETRY_DELAY = 5 
@@ -105,17 +122,13 @@ class FlightMonitor:
     def _on_open(self, ws):
         """Envia o pacote de identificação e inicia o loop de envio."""
         
-        # CHAVE: Busca o plano de voo
         flight_plan = _fetch_network_flight_plan(self.vatsim_id, self.ivao_id)
         
-        # Atualiza o pilot_data que será usado pelo FlightEventLogger
         self.pilot_data['departureId'] = flight_plan['departureId']
         self.pilot_data['arrivalId'] = flight_plan['arrivalId']
         
-        # NOVO: Injeta o ID de rede real encontrado para ser priorizado no log de eventos
         self.pilot_data['actual_network_id'] = flight_plan['networkUserId'] 
         
-        # Inicializa o logger com os IDs atualizados
         if self.event_logger is None:
              self.event_logger = FlightEventLogger(self.display_name, self.pilot_data)
 
@@ -154,7 +167,7 @@ class FlightMonitor:
                 pass
 
     def _send_data_loop(self):
-        """Loop principal de coleta de dados, detecção de eventos e envio WebSocket."""
+        """Loop principal de coleta de dados, detecção de eventos, envio WebSocket e SINTONIA DO RÁDIO."""
         global flight_data, sm, CONN_STATUS
         simconnect_fail_logged = False
         
@@ -166,7 +179,16 @@ class FlightMonitor:
                 fetch_all_data()
                 current_rounded = create_rounded_data(flight_data)
                 
-                # Assume que self.event_logger está inicializado em _on_open
+                # NOVO: Sintonizar o rádio com a frequência COM1 ativa
+                if self.radio_client and current_rounded.get('com1_active', 0.0) != 0.0:
+                    com1_freq = current_rounded['com1_active']
+                    new_freq_str = f"{com1_freq:.3f}"
+                    
+                    # CHAVE: Verifica se a nova frequência é diferente da última sintonizada
+                    if new_freq_str != self.last_tuned_freq:
+                        self.radio_client.tune_frequency(new_freq_str)
+                        self.last_tuned_freq = new_freq_str # Atualiza a última sintonizada
+                
                 if self.event_logger:
                     self.event_logger.check_and_log_events(current_rounded) 
 

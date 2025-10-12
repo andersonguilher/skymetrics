@@ -81,8 +81,8 @@ class MonitorFrame(ttk.Frame):
         self.data_vars = {
             "alt_ind": ttk.StringVar(value="0 ft"), "vs": ttk.StringVar(value="0 fpm"), "ias": ttk.StringVar(value="0 kts"), 
             "agl": ttk.StringVar(value="0 ft"), "g_force": ttk.StringVar(value="1.0 g"), "fuel": ttk.StringVar(value="0 gal"),
-            "com1_active": ttk.StringVar(value="N/A MHz"), # NOVO
-            "com2_active": ttk.StringVar(value="N/A MHz")  # NOVO
+            "com1_active": ttk.StringVar(value="N/A MHz"), 
+            "com2_active": ttk.StringVar(value="N/A MHz")  
         }
         
         ttk.Label(self, text=f"Monitor de Telemetria", font=("TkDefaultFont", 12, "bold")).pack(pady=(0, 10))
@@ -108,14 +108,21 @@ class MonitorFrame(ttk.Frame):
         self._create_data_row(data_frame, "G-FORCE:", "g_force", 4)
         self._create_data_row(data_frame, "TOTAL FUEL:", "fuel", 5)
         
-        ttk.Separator(self).pack(fill='x', pady=10) # Separator entre métricas e frequências
+        ttk.Separator(self).pack(fill='x', pady=10) 
         
-        self._create_data_row(data_frame, "COM1 ACTIVE:", "com1_active", 6) # NOVO
-        self._create_data_row(data_frame, "COM2 ACTIVE:", "com2_active", 7) # NOVO
+        self._create_data_row(data_frame, "COM1 ACTIVE:", "com1_active", 6) 
+        self._create_data_row(data_frame, "COM2 ACTIVE:", "com2_active", 7) 
         
         ttk.Separator(self).pack(fill='x', pady=10)
+        
+        # NOVO: Botão de Configuração do Rádio
+        ttk.Button(self, text="Rádio Configurações", command=self._show_radio_config, bootstyle="info-outline").pack(pady=(5, 5))
+
         ttk.Button(self, text="Logoff", command=master._handle_logoff, bootstyle="danger-outline").pack(pady=(5, 0))
 
+    def _show_radio_config(self):
+        """Chama a função no MainApplication para abrir a janela de configuração do rádio."""
+        self.master._show_radio_config_window() 
 
     def _create_data_row(self, parent, label_text: str, var_key: str, row_num: int):
         row = ttk.Frame(parent, padding=2); row.pack(fill='x')
@@ -134,7 +141,7 @@ class MonitorFrame(ttk.Frame):
         self.data_vars["g_force"].set(f"{data['g_force']:.1f} g")
         self.data_vars["fuel"].set(f"{int(data['total_fuel']):,} gal".replace(',', '.'))
         
-        # NOVO: Atualiza as frequências COM
+        # Atualiza as frequências COM
         self.data_vars["com1_active"].set(f"{data['com1_active']:.3f} MHz")
         self.data_vars["com2_active"].set(f"{data['com2_active']:.3f} MHz")
         
