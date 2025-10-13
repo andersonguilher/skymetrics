@@ -23,7 +23,23 @@ def format_number(value, decimals):
 class FlightEventLogger:
     def __init__(self, pilot_name: str, pilot_data: Dict[str, Any]):
         self.pilot_name = pilot_name
-        self.log_user_id = pilot_data.get('vatsim_id') if pilot_data.get('vatsim_id') not in ('', 'N/A') else pilot_data.get('ivao_id', 'N/A')
+        
+        # CORREÇÃO: PRIORIZA O ID DE REDE ATUALIZADO ('actual_network_id')
+        actual_network_id = str(pilot_data.get('actual_network_id', 'N/A'))
+        vatsim_id = str(pilot_data.get('vatsim_id', 'N/A'))
+        ivao_id = str(pilot_data.get('ivao_id', 'N/A'))
+        
+        # Prioriza o ID atualizado do monitor.
+        if actual_network_id not in ('N/A', '', '0'):
+            self.log_user_id = actual_network_id
+        # Caso contrário, usa a lógica original (vatsim > ivao)
+        elif vatsim_id not in ('N/A', '', '0'):
+            self.log_user_id = vatsim_id
+        elif ivao_id not in ('N/A', '', '0'):
+            self.log_user_id = ivao_id
+        else:
+            self.log_user_id = 'N/A'
+        
         self.log_lock = Lock()
         
         self.is_airborne = False
@@ -35,7 +51,6 @@ class FlightEventLogger:
         self.event_log: List[Dict[str, Any]] = []
         self.last_alert_timestamps: Dict[str, float] = {}
 
-        # CORREÇÃO: Remove o fatiamento do nome. Confia nos IDs preenchidos por _fetch_network_flight_plan.
         self.departure_id = pilot_data.get('departureId', 'N/A').upper()
         self.arrival_id = pilot_data.get('arrivalId', 'N/A').upper()
 
@@ -84,26 +99,39 @@ class FlightEventLogger:
 
     def check_and_log_events(self, data: Dict[str, Any]):
         """Executa a detecção e o registro de todos os eventos de voo."""
-        current_agl = data.get('agl', 0); current_gs = data.get('gs', 0) # ALTERADO: Lendo 'gs'
+        current_agl = data.get('agl', 0); current_gs = data.get('gs', 0) 
         current_vs = data.get('vs', 0); current_on_ground = data.get('on_ground', 0)
         current_bank = data.get('plane_bank_degrees', 0); eng_combustion = data.get('eng_combustion', 0)
         alerts = data.get('alerts', {})
 
-        # A. INÍCIO DO VOO
-        if self.has_landed and not self.is_airborne and not self.initial_fuel_logged and eng_combustion == 1 and current_on_ground == 1 and current_gs >= GS_TAXI_START_KTS: # ALTERADO: De current_ias para current_gs e IAS_TAXI_START_KTS para GS_TAXI_START_KTS
-            self._log_event("INICIO_VOO", f"Início de taxi detectado. GS >= {GS_TAXI_START_KTS} kts no solo.", data) # Texto atualizado
+        # A.1. REGISTRO DE MOTOR LIGADO E COMBUSTÍVEL INICIAL (MESMO PARADO)
+        if not self.initial_fuel_logged and eng_combustion == 1 and current_on_ground == 1:
+            self._log_event("MOTOR_LIGADO", "Motor detectado como ligado (Parado ou Taxiando).", data)
             self._log_event("COMBUSTIVEL_INICIAL", f"Motor ligado. Combustível: {format_number(data.get('total_fuel', 0), 0)} gal", data)
-            self.initial_fuel_logged = True; self.has_landed = False; self.flight_ended = False
+            self.initial_fuel_logged = True
+            
+            # Se o avião já estiver taxiando...
+            if self.has_landed and not self.is_airborne and current_gs >= GS_TAXI_START_KTS:
+                self._log_event("INICIO_VOO", f"Início de taxi detectado (no boot com movimento). GS >= {GS_TAXI_START_KTS} kts no solo.", data) 
+                self.has_landed = False 
+                self.flight_ended = False
 
-        # B. DECOLAGEM
-        if not self.is_airborne and self.initial_fuel_logged and current_agl > 50 and current_gs > 40: # ALTERADO: De current_ias para current_gs
+        # A.2. INÍCIO DO VOO / INÍCIO DO TAXI 
+        if self.initial_fuel_logged and self.has_landed and not self.is_airborne and current_on_ground == 1 and current_gs >= GS_TAXI_START_KTS:
+            self._log_event("INICIO_VOO", f"Início de taxi detectado. GS >= {GS_TAXI_START_KTS} kts no solo.", data)
+            self.has_landed = False 
+            self.flight_ended = False
+
+        # B. DECOLAGEM (CORRIGIDO: GS Mínimo alterado para 30 kts)
+        # Condição: Não está no ar, combustível inicial registrado, altitude acima do solo > 50 pés, e velocidade > 30 kts.
+        if not self.is_airborne and self.initial_fuel_logged and current_agl > 50 and current_gs > 30:
             self.is_airborne = True; self.has_landed = False; self.flight_ended = False
-            self._log_event("DECOLAGEM", "Decolagem detectada. Aeronave no ar.", data)
+            self._log_event("DECOLAGEM", f"Decolagem detectada. Aeronave no air (AGL > 50 ft e GS > 30 kts).", data)
 
         # C. POUSO
         if self.is_airborne and current_on_ground == 1 and current_agl < 100 and not self.has_landed:
             if self.landing_vs is None: data['landing_vs'] = self.last_vs; self.landing_vs = self.last_vs
-            if current_gs < 10: # ALTERADO: De current_ias para current_gs
+            if current_gs < 10: 
                 self.has_landed = True; self.is_airborne = False
                 vs_no_toque = self.landing_vs if self.landing_vs is not None else current_vs
                 data['landing_vs'] = vs_no_toque 
@@ -129,7 +157,7 @@ class FlightEventLogger:
             self.landing_vs = None; self.last_alert_timestamps = {}
             
         # H. POUSO RESET (Touch-and-Go)
-        if self.initial_fuel_logged and self.has_landed and current_on_ground == 1 and current_gs >= GS_TAXI_START_KTS: # ALTERADO: De current_ias para current_gs e IAS_TAXI_START_KTS para GS_TAXI_START_KTS
+        if self.initial_fuel_logged and self.has_landed and current_on_ground == 1 and current_gs >= GS_TAXI_START_KTS: 
             if self.event_log:
                 self._log_event("SEGMENTO_CONCLUIDO", "Segmento de voo anterior concluído (Touch-and-Go ou re-takeoff). Enviando logs acumulados.", data)
                 self.post_full_flight_log() 

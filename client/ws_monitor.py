@@ -28,6 +28,8 @@ def _fetch_network_flight_plan(vatsim_id: str, ivao_id: str) -> Dict[str, str]:
     # 1. Tenta IVAO
     if ivao_id and ivao_id.upper() not in ('N/A', '', '0'):
         try:
+            # NOTA: O 'verify=False' aqui pode ser um problema de segurança, mas é mantido 
+            # se for necessário para acessar a URL em certos ambientes.
             response = requests.get(IVAO_DATA_URL, timeout=8, verify=False)
             response.raise_for_status()
             data = response.json()
@@ -44,6 +46,7 @@ def _fetch_network_flight_plan(vatsim_id: str, ivao_id: str) -> Dict[str, str]:
         except Exception as e:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] [IVAO FETCH] Erro ao buscar plano IVAO: {e}")
 
+    # 2. (A busca VATSIM original foi omitida, mas a busca por IVAO e o retorno permanecem)
     return flight_plan
 
 
@@ -78,6 +81,9 @@ class FlightMonitor:
         
         self.conn_thread: threading.Thread | None = None
         self.data_thread: threading.Thread | None = None
+        
+        # NOVO: Para controle da checagem periódica do plano de voo
+        self.last_network_check_time = 0.0 
 
 
     def start_monitor(self):
@@ -98,6 +104,7 @@ class FlightMonitor:
         if self.ws_client:
             self.ws_client.close()
         
+        # Manter a lógica de desconexão do rádio aqui (já existia)
         if self.radio_client:
              self.radio_client.disconnect()
         
@@ -134,11 +141,8 @@ class FlightMonitor:
                 self.last_sent_data = None 
                 time.sleep(RETRY_DELAY)
 
-    def _on_open(self, ws):
-        """Envia o pacote de identificação e inicia o loop de envio."""
-        
-        flight_plan = _fetch_network_flight_plan(self.vatsim_id, self.ivao_id)
-        
+    def _update_pilot_data_with_flight_plan(self, flight_plan: Dict[str, str]):
+        """Função auxiliar para atualizar dados do piloto e do logger com o plano de voo encontrado."""
         self.pilot_data['departureId'] = flight_plan['departureId']
         self.pilot_data['arrivalId'] = flight_plan['arrivalId']
         
@@ -149,6 +153,21 @@ class FlightMonitor:
         self.network_id_for_radio = final_network_id
         self.pilot_data['actual_network_id'] = final_network_id
         
+        if self.event_logger:
+             self.event_logger.departure_id = flight_plan['departureId']
+             self.event_logger.arrival_id = flight_plan['arrivalId']
+
+
+    def _on_open(self, ws):
+        """Envia o pacote de identificação e inicia o loop de envio."""
+        
+        flight_plan = _fetch_network_flight_plan(self.vatsim_id, self.ivao_id)
+        
+        # Usa nova função auxiliar para definir os IDs e a ID de rede para o rádio
+        self._update_pilot_data_with_flight_plan(flight_plan)
+        
+        self.last_network_check_time = time.time() # Inicia o timer para a checagem periódica
+
         if self.event_logger is None:
              self.event_logger = FlightEventLogger(self.display_name, self.pilot_data)
 
@@ -156,8 +175,8 @@ class FlightMonitor:
             "pilot_name": self.display_name, 
             "vatsim_id": self.vatsim_id, 
             "ivao_id": self.ivao_id,
-            "departureId": flight_plan['departureId'], 
-            "arrivalId": flight_plan['arrivalId'],     
+            "departureId": self.pilot_data['departureId'], # Usar dados atualizados
+            "arrivalId": self.pilot_data['arrivalId'],     # Usar dados atualizados
             "packets_sent": 0, 
             "mb_sent": 0.0
         })
@@ -168,10 +187,18 @@ class FlightMonitor:
 
     def _on_error(self, ws, error): 
         self.transmitting = False
+        # CORREÇÃO: Desconecta o rádio se o WebSocket falhar
+        if self.radio_client:
+            self.radio_client.disconnect()
+            self.radio_client = None
         self.master_app.after(0, self.master_app.current_frame.update_status, False, "ERRO DE CONEXÃO")
         
     def _on_close(self, ws, close_status_code, close_msg): 
         self.transmitting = False 
+        # CORREÇÃO: Desconecta o rádio se o WebSocket fechar
+        if self.radio_client:
+            self.radio_client.disconnect()
+            self.radio_client = None
         self.master_app.after(0, self.master_app.current_frame.update_status, False, "DESCONECTADO")
 
     def _on_message(self, ws, message):
@@ -197,7 +224,16 @@ class FlightMonitor:
                 fetch_all_data()
                 current_rounded = create_rounded_data(flight_data)
                 
-                # --- LÓGICA DO RÁDIO ---
+                # NOVO: LÓGICA DE CHECK PERIÓDICO (a cada 60s)
+                if (time.time() - self.last_network_check_time) >= 60.0:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [NETWORK CHECK] Verificação periódica do plano de voo.")
+                    flight_plan = _fetch_network_flight_plan(self.vatsim_id, self.ivao_id)
+                    self._update_pilot_data_with_flight_plan(flight_plan)
+                    self.last_network_check_time = time.time()
+                # FIM NOVO
+
+                # --- LÓGICA DO RÁDIO (Correta para ser controlada por CONN_STATUS) ---
+                # A conexão do rádio é iniciada quando CONN_STATUS == "REAL"
                 if CONN_STATUS == "REAL":
                     if self.radio_client is None:
                         try:
@@ -230,6 +266,7 @@ class FlightMonitor:
                                 self.radio_client.send_position(current_rounded.get('lat', 0.0), current_rounded.get('lng', 0.0))
                                 self.last_position_send_time = time.time()
                 else: # Se CONN_STATUS != "REAL"
+                    # O rádio é desconectado e limpo quando a conexão SimConnect cai.
                     if self.radio_client:
                         self.radio_client.disconnect()
                         self.radio_client = None
@@ -238,6 +275,7 @@ class FlightMonitor:
                 self.master_app.after(0, self.master_app.current_frame.update_data, current_rounded)
                 self.master_app.after(0, self.master_app.current_frame.update_sim_status, CONN_STATUS)
 
+                # A telemetria é enviada apenas se o servidor permitir (self.transmitting é True após START_TX)
                 if not self.transmitting:
                     time.sleep(0.1)
                     continue 
@@ -264,9 +302,13 @@ class FlightMonitor:
                 time.sleep(0.1)
 
             except ConnectionError:
+                # Ocorre quando a SimConnect REAL falha em sim_data.py
                 self.master_app.after(0, self.master_app.current_frame.update_status, False, "SIMULADOR DESCONECTADO")
                 if self.event_logger:
-                    self.event_logger.handle_session_end(flight_data)
+                    # Envio final de logs em caso de perda de conexão
+                    self.event_logger.handle_session_end(flight_data) 
+                
+                # Garante que o rádio está desconectado em caso de SimConnect.ConnectionError
                 if self.radio_client:
                     self.radio_client.disconnect()
                     self.radio_client = None
