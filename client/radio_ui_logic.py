@@ -534,7 +534,7 @@ class RadioClient:
         # Se a intenção é registrar, cria um novo hook.
         if register:
             try:
-                self._ptt_hook = keyboard.hook(self.ptt_key_handler, suppress=True)
+                self._ptt_hook = keyboard.hook(self.ptt_key_handler, suppress=False)
             except Exception as e:
                 print(f"[RÁDIO CRÍTICO] Falha ao registrar o hook do teclado: {e}")
 
