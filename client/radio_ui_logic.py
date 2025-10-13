@@ -221,6 +221,7 @@ class RadioClient:
         self.joystick_thread = None
         self.is_listening_for_ptt = False
         self.current_joystick = None
+        self._ptt_hook = None
 
         # Variáveis de volume/PTT
         self.mic_volume_factor = self.config.get('mic_volume_factor', 1.0)
@@ -502,28 +503,40 @@ class RadioClient:
             except: pass
             self.stream_in = None
 
-    # --- Lógica PTT e Joystick (mantida) ---
+    # --- Lógica PTT e Joystick (MODIFICADA) ---
+    
+    def ptt_key_handler(self, event):
+        if event.name.lower() != self.ptt_key.lower():
+            return
+
+        if event.event_type == keyboard.KEY_DOWN and not self.is_ptt_active:
+            self.start_transmission_ptt()
+        elif event.event_type == keyboard.KEY_UP:
+            if self.is_ptt_active:
+                self.stop_transmission()
 
     def set_ptt_hotkeys(self, key_name, register):
         """Registra/desregistra as hotkeys PTT (apenas para TECLADO)."""
-        if not JOYSTICK_AVAILABLE: return
+        if not JOYSTICK_AVAILABLE:
+            return
 
-        # Garante que não tentaremos registrar um botão de joystick com a biblioteca de teclado.
         if key_name.lower().startswith('joy_button_'):
             return
 
-        start_func = self.start_transmission_ptt
-        stop_func = self.stop_transmission
-
-        if key_name and isinstance(key_name, str):
+        # Remove o hook anterior, se existir.
+        if self._ptt_hook:
             try:
-                keyboard.remove_hotkey(key_name)
-            except:
-                pass
+                keyboard.unhook(self._ptt_hook)
+            except (KeyError, AttributeError):
+                pass  # Ignora erros se o hook já foi removido.
+            self._ptt_hook = None
 
-            if register:
-                keyboard.add_hotkey(key_name, start_func, suppress=True)
-                keyboard.add_hotkey(key_name, stop_func, suppress=True, trigger_on_release=True)
+        # Se a intenção é registrar, cria um novo hook.
+        if register:
+            try:
+                self._ptt_hook = keyboard.hook(self.ptt_key_handler, suppress=True)
+            except Exception as e:
+                print(f"[RÁDIO CRÍTICO] Falha ao registrar o hook do teclado: {e}")
 
 
     def start_joystick_monitor(self):
@@ -807,9 +820,7 @@ class RadioConfigWindow(tk.Toplevel):
             return
 
         captured_key = event.name.lower()
-        if captured_key in ['ctrl', 'alt', 'shift', 'left alt', 'right alt']:
-            return
-
+        
         keyboard.unhook_all()
         self._end_ptt_capture(captured_key)
 
