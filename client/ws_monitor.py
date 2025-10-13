@@ -69,11 +69,12 @@ class FlightMonitor:
         self.event_logger: FlightEventLogger | None = None
         self.pilot_data = pilot_data 
         
+        # Atributos para controle do rádio
         self.radio_client: RadioClient | None = None
-        self.last_tuned_freq: str = "N/A" 
+        self.last_tuned_com2_freq: str = "N/A" 
         self.network_id_for_radio: str = "N/A"
-        
-        self.last_position_send_time = 0.0 # NOVO: Variável de controle de tempo para posição
+        self.radio_was_connected = False
+        self.last_position_send_time = 0.0
         
         self.conn_thread: threading.Thread | None = None
         self.data_thread: threading.Thread | None = None
@@ -94,26 +95,20 @@ class FlightMonitor:
         """Encerra o monitor de forma segura, espera pelas threads e limpa o SimConnect globalmente."""
         self.running = False
         
-        # 1. Feche o WebSocket (para que a thread de conexão saia)
         if self.ws_client:
             self.ws_client.close()
         
-        # 2. Desconecte o rádio (limpeza de recursos de áudio)
         if self.radio_client:
              self.radio_client.disconnect()
         
-        # 3. Espere as threads de fundo
         TIMEOUT = 1.0 
         
-        # Espere a thread de dados
         if self.data_thread and self.data_thread.is_alive():
              self.data_thread.join(timeout=TIMEOUT) 
         
-        # Espere a thread de conexão
         if self.conn_thread and self.conn_thread.is_alive():
              self.conn_thread.join(timeout=TIMEOUT)
 
-        # 4. Limpeza do SimConnect global (garante que o handle seja liberado)
         global sm, CONN_STATUS
         if sm:
             try: 
@@ -142,22 +137,17 @@ class FlightMonitor:
     def _on_open(self, ws):
         """Envia o pacote de identificação e inicia o loop de envio."""
         
-        # [MODIFICAÇÃO APLICADA] Resetar a última frequência sintonizada para forçar a sintonia no primeiro loop de dados, 
-        # garantindo que a frequência atual da COM2 seja enviada ao servidor de rádio.
-        self.last_tuned_freq = "N/A"
-        
         flight_plan = _fetch_network_flight_plan(self.vatsim_id, self.ivao_id)
         
         self.pilot_data['departureId'] = flight_plan['departureId']
         self.pilot_data['arrivalId'] = flight_plan['arrivalId']
         
-        final_network_id = flight_plan['networkUserId']
-        if final_network_id == 'N/A' or final_network_id == '':
-             # Fallback: Se não encontrou online, usa o ID da config (VATSIM ID)
-             final_network_id = self.vatsim_id 
+        final_network_id = flight_plan.get('networkUserId', 'N/A')
+        if not final_network_id or final_network_id == 'N/A':
+             final_network_id = self.vatsim_id or self.ivao_id
              
-        self.network_id_for_radio = final_network_id # ARMAZENA
-        self.pilot_data['actual_network_id'] = final_network_id # Atualiza o dict
+        self.network_id_for_radio = final_network_id
+        self.pilot_data['actual_network_id'] = final_network_id
         
         if self.event_logger is None:
              self.event_logger = FlightEventLogger(self.display_name, self.pilot_data)
@@ -198,98 +188,64 @@ class FlightMonitor:
             except Exception:
                 pass
 
-
     def _send_data_loop(self):
         """Loop principal de coleta de dados, detecção de eventos, envio WebSocket e SINTONIA DO RÁDIO."""
         global flight_data, sm, CONN_STATUS
-        simconnect_fail_logged = False
         
-        while self.running and self.ws_client.sock and self.ws_client.sock.connected:
+        while self.running and self.ws_client and self.ws_client.sock and self.ws_client.sock.connected:
             try:
-                # 1. COLETAR DADOS DO SIMULADOR (Isto agora tentará RECONECTAR se estiver em SIMULADO)
                 fetch_all_data()
                 current_rounded = create_rounded_data(flight_data)
                 
-                # --- BLOCO REATIVO: GERENCIAMENTO DE ESTADO DO RÁDIO ---
+                # --- LÓGICA DO RÁDIO ---
                 if CONN_STATUS == "REAL":
-                    # ATUALIZA O STATUS DO SIMCONNECT NA UI PARA "REAL"
-                    self.master_app.after(0, self.master_app.current_frame.update_sim_status, "REAL") 
-
                     if self.radio_client is None:
-                        # Tenta instanciar e conectar o rádio
                         try:
-                            print(f"[{datetime.now().strftime('%H:%M:%S')}] [RÁDIO INFO] SimConnect REAL detectado. Tentando instanciar RadioClient...")
-                            
-                            # ALTERAÇÃO: Passa a referência do MainApplication E o ID de rede final
-                            self.radio_client = RadioClient(master_app=self.master_app, pilot_id=self.network_id_for_radio) 
-                            
-                            # Se o PyAudio/PyGame falhou na inicialização (radio_ui_logic.py), self.p será None.
-                            if self.radio_client.p is not None:
+                            print(f"[{datetime.now().strftime('%H:%M:%S')}] [RÁDIO INFO] SimConnect REAL detectado. Instanciando RadioClient...")
+                            self.radio_client = RadioClient(master_app=self.master_app, pilot_id=self.network_id_for_radio)
+                            if self.radio_client.p:
                                 self.radio_client.connect()
-                                print(f"[{datetime.now().strftime('%H:%M:%S')}] [RÁDIO INFO] Cliente de rádio inicializado e conectando automaticamente.")
+                                print(f"[{datetime.now().strftime('%H:%M:%S')}] [RÁDIO INFO] RadioClient conectado.")
                             else:
-                                # Se a inicialização de dependências falhou, descartamos o cliente e informamos na UI.
                                 self.radio_client = None
-                                self.master_app.after(0, self.master_app.current_frame.update_status, False, "RÁDIO DESATIVADO (Dependência)")
-
                         except Exception as e:
-                            # Captura erros de thread, memória, ou outros erros críticos na inicialização.
+                            print(f"[{datetime.now().strftime('%H:%M:%S')}] [RÁDIO CRÍTICO] Falha ao instanciar RadioClient: {e}")
                             self.radio_client = None
-                            self.master_app.after(0, self.master_app.current_frame.update_status, False, "RÁDIO FALHOU (Instância)")
-                            print(f"[{datetime.now().strftime('%H:%M:%S')}] [RÁDIO CRÍTICO] Falha crítica ao instanciar RadioClient: {e}. Desativando o rádio.")
-                else:
-                    # Se o status for SIMULADO (o estado padrão ou após desconexão), atualiza a UI
-                    self.master_app.after(0, self.master_app.current_frame.update_sim_status, "SIMULADO") 
                     
                     if self.radio_client:
-                        # DESCONECTA O RÁDIO SE O STATUS VOLTAR PARA SIMULADO
+                        is_connected = self.radio_client.sio.connected
+                        if is_connected and not self.radio_was_connected:
+                            self.last_tuned_com2_freq = None # Força a resincronização da frequência na reconexão
+                        self.radio_was_connected = is_connected
+
+                        if is_connected:
+                            # Sincroniza COM2
+                            current_com2_freq = f"{current_rounded.get('com2_active', 0.0):.3f}"
+                            if current_com2_freq != self.last_tuned_com2_freq:
+                                self.radio_client.tune_frequency(current_com2_freq)
+                                self.last_tuned_com2_freq = current_com2_freq
+                            
+                            # Envia posição (com otimização)
+                            if (time.time() - self.last_position_send_time) >= 2.0:
+                                self.radio_client.send_position(current_rounded.get('lat', 0.0), current_rounded.get('lng', 0.0))
+                                self.last_position_send_time = time.time()
+                else: # Se CONN_STATUS != "REAL"
+                    if self.radio_client:
                         self.radio_client.disconnect()
                         self.radio_client = None
-                        
-                # 2. SINTONIZAR O RÁDIO E ENVIAR POSIÇÃO (BLOCO TRY/EXCEPT DE USO)
-                if self.radio_client:
-                    try:
-                        # SINTONIZAR: AGORA SINTONIZA NA COM2 (Prioriza COM2)
-                        com2_freq = current_rounded.get('com2_active', 0.0) # <--- ALTERADO PARA COM2
-                        
-                        if com2_freq != 0.0:
-                            new_freq_str = f"{com2_freq:.3f}"
-                            
-                            # Verifica se a frequência é válida e diferente da última sintonizada
-                            if new_freq_str != self.last_tuned_freq:
-                                self.radio_client.tune_frequency(new_freq_str)
-                                self.last_tuned_freq = new_freq_str 
-                        
-                        # ENVIAR POSIÇÃO (Otimização: envia no máximo a cada 2 segundos)
-                        current_time = time.time()
-                        if (current_time - self.last_position_send_time) >= 2.0:
-                            lat = current_rounded.get('lat', 0.0)
-                            lng = current_rounded.get('lng', 0.0)
-                            self.radio_client.send_position(lat, lng)
-                            self.last_position_send_time = current_time # Atualiza o tempo do último envio
+                # --- FIM DA LÓGICA DO RÁDIO ---
 
-                    except Exception as e:
-                         # Erro de uso do rádio (e.g., erro de socket na conexão ou stream)
-                         print(f"[{datetime.now().strftime('%H:%M:%S')}] [RÁDIO CRÍTICO] Erro durante o uso do RadioClient: {e}. Desconectando o rádio.")
-                         # Desconecta e descarta para forçar a re-inicialização
-                         self.radio_client.disconnect()
-                         self.radio_client = None 
-                         self.master_app.after(0, self.master_app.current_frame.update_status, False, "RÁDIO FALHOU (Uso)")
-                # --- FIM DO BLOCO REATIVO ---
-
-                # 3. ATUALIZAR UI LOCAL (Sempre)
                 self.master_app.after(0, self.master_app.current_frame.update_data, current_rounded)
-                
-                # 4. VERIFICAR STATUS DE TRANSMISSÃO (Bloqueia APENAS o Log de Eventos e o envio da Telemetria)
+                self.master_app.after(0, self.master_app.current_frame.update_sim_status, CONN_STATUS)
+
                 if not self.transmitting:
-                    time.sleep(0.1); continue 
-                
-                # Início da lógica que SÓ DEVE rodar se estiver transmitindo
+                    time.sleep(0.1)
+                    continue 
+
                 if self.event_logger:
                     self.event_logger.check_and_log_events(current_rounded) 
 
                 force_send = (time.time() - self.last_send_time) >= self.heartbeat_interval
-
                 if has_significant_change(current_rounded, self.last_sent_data) or force_send:
                     self.last_sent_data = current_rounded.copy()
                     self.packets_sent_count += 1
@@ -307,40 +263,18 @@ class FlightMonitor:
                 
                 time.sleep(0.1)
 
-            except ConnectionError as e:
-                # Captura a nova exceção de perda de conexão REAL de sim_data.py (Simulador fechado)
-                simconnect_fail_logged = True
-                self.transmitting = False 
+            except ConnectionError:
                 self.master_app.after(0, self.master_app.current_frame.update_status, False, "SIMULADOR DESCONECTADO")
-                self.master_app.after(0, self.master_app.current_frame.update_sim_status, "SIMULADO (PERDA)") 
-                
-                last_data = current_rounded if 'current_rounded' in locals() else flight_data
                 if self.event_logger:
-                    self.event_logger.handle_session_end(last_data)
-                
-                # A próxima iteração chamará fetch_all_data(), que tentará a reconexão.
-                time.sleep(0.1)
+                    self.event_logger.handle_session_end(flight_data)
+                if self.radio_client:
+                    self.radio_client.disconnect()
+                    self.radio_client = None
+                time.sleep(1) # Aguarda antes de tentar reconectar
                 
             except Exception as e: 
-                # Lógica de falha original (erros não relacionados ao SimConnect)
-                if CONN_STATUS == "REAL" and not simconnect_fail_logged:
-                    simconnect_fail_logged = True
-                    self.transmitting = False 
-                    self.master_app.after(0, self.master_app.current_frame.update_status, False, "SIMULADOR DESCONECTADO")
-                    self.master_app.after(0, self.master_app.current_frame.update_sim_status, f"{CONN_STATUS} (FALHA)")
-                    
-                    if self.radio_client:
-                        self.radio_client.disconnect()
-                        self.radio_client = None
-
-                    last_data = current_rounded if 'current_rounded' in locals() else flight_data
-                    if self.event_logger:
-                        self.event_logger.handle_session_end(last_data)
-
-                    if sm: 
-                        try: sm.exit(); sm = None 
-                        except Exception: pass 
-                    
-                    break
-                
-                time.sleep(0.1)
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Erro no loop de dados: {e}")
+                if self.radio_client:
+                    self.radio_client.disconnect()
+                    self.radio_client = None
+                time.sleep(1)
