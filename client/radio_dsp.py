@@ -23,8 +23,8 @@ OUTPUT_GAIN = 8.0
 MAX_INT_16 = np.iinfo(np.int16).max
 
 # Constantes para o limite de degradação
-MAX_DEGRADATION_NOISE_LEVEL = 0.005  # Nível máximo de ruído para degradação total
-MIN_VOICE_GAIN = 0.1                # Ganho mínimo da voz para degradação total (10% do original)
+MAX_DEGRADATION_NOISE_LEVEL = 0.5  # Nível máximo de ruído para degradação total
+MIN_VOICE_GAIN = 0.0 # Ganho mínimo da voz para degradação total (10% do original)
 
 
 def apply_bandpass_filter(data_np, sample_rate):

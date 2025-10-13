@@ -71,6 +71,9 @@ class FlightMonitor:
         
         self.radio_client: RadioClient | None = None
         self.last_tuned_freq: str = "N/A" 
+        self.network_id_for_radio: str = "N/A"
+        
+        self.last_position_send_time = 0.0 # NOVO: Variável de controle de tempo para posição
         
         self.conn_thread: threading.Thread | None = None
         self.data_thread: threading.Thread | None = None
@@ -144,7 +147,13 @@ class FlightMonitor:
         self.pilot_data['departureId'] = flight_plan['departureId']
         self.pilot_data['arrivalId'] = flight_plan['arrivalId']
         
-        self.pilot_data['actual_network_id'] = flight_plan['networkUserId'] 
+        final_network_id = flight_plan['networkUserId']
+        if final_network_id == 'N/A' or final_network_id == '':
+             # Fallback: Se não encontrou online, usa o ID da config (VATSIM ID)
+             final_network_id = self.vatsim_id 
+             
+        self.network_id_for_radio = final_network_id # ARMAZENA
+        self.pilot_data['actual_network_id'] = final_network_id # Atualiza o dict
         
         if self.event_logger is None:
              self.event_logger = FlightEventLogger(self.display_name, self.pilot_data)
@@ -207,7 +216,8 @@ class FlightMonitor:
                         try:
                             print(f"[{datetime.now().strftime('%H:%M:%S')}] [RÁDIO INFO] SimConnect REAL detectado. Tentando instanciar RadioClient...")
                             
-                            self.radio_client = RadioClient() 
+                            # ALTERAÇÃO: Passa a referência do MainApplication E o ID de rede final
+                            self.radio_client = RadioClient(master_app=self.master_app, pilot_id=self.network_id_for_radio) 
                             
                             # Se o PyAudio/PyGame falhou na inicialização (radio_ui_logic.py), self.p será None.
                             if self.radio_client.p is not None:
@@ -246,10 +256,13 @@ class FlightMonitor:
                                 self.radio_client.tune_frequency(new_freq_str)
                                 self.last_tuned_freq = new_freq_str 
                         
-                        # ENVIAR POSIÇÃO
-                        lat = current_rounded.get('lat', 0.0)
-                        lng = current_rounded.get('lng', 0.0)
-                        self.radio_client.send_position(lat, lng)
+                        # ENVIAR POSIÇÃO (Otimização: envia no máximo a cada 2 segundos)
+                        current_time = time.time()
+                        if (current_time - self.last_position_send_time) >= 2.0:
+                            lat = current_rounded.get('lat', 0.0)
+                            lng = current_rounded.get('lng', 0.0)
+                            self.radio_client.send_position(lat, lng)
+                            self.last_position_send_time = current_time # Atualiza o tempo do último envio
 
                     except Exception as e:
                          # Erro de uso do rádio (e.g., erro de socket na conexão ou stream)

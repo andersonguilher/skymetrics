@@ -11,6 +11,7 @@ import json
 import os 
 import numpy as np 
 import sys # Para diagnósticos
+from datetime import datetime # ADICIONADO PARA USO NO PRINT DE DIAGNÓSTICO
 
 # --- Importação e Verificação de Módulos (Inicialização Resiliente) ---
 # Variáveis globais de controle
@@ -67,6 +68,20 @@ def get_device_name_by_index(index, device_map):
         if idx == index:
             return name
     return None
+
+# NOVO: Função para reverter o cálculo do fator para a distância em KM
+def reverse_degradation_factor(factor: float) -> float:
+    """Calcula a distância (km) correspondente ao fator de degradação (0.0 a 1.0),
+       limitada ao MAX_RANGE_KM."""
+    # O fator já deve ser um valor entre 0.0 e 1.0
+    factor = max(0.0, min(1.0, factor))
+    
+    # d = f * (MAX_RANGE_KM - MIN_RANGE_KM) + MIN_RANGE_KM
+    range_diff = MAX_RANGE_KM - MIN_RANGE_KM
+    distance = factor * range_diff + MIN_RANGE_KM
+    
+    # Se o fator for 1.0, o resultado é MAX_RANGE_KM, o que é o comportamento desejado.
+    return distance
 
 # --- LÓGICA DE GERENCIAMENTO DE ÁUDIO ---
 
@@ -185,13 +200,15 @@ class VolumeKnob(tk.Canvas):
 # --- CLASSE PRINCIPAL DO CLIENTE RÁDIO ---
 
 class RadioClient:
-    def __init__(self):
+    def __init__(self, master_app=None, pilot_id="N/A"): # ADICIONADO pilot_id
         # Apenas inicializa PyAudio se a importação foi bem-sucedida
         if not JOYSTICK_AVAILABLE:
             self.p = None
             self.sio = socketio.Client() # SocketIO é necessário para a UI, mesmo que o áudio falhe
             return
             
+        self.master_app = master_app # NOVO: Armazena a referência do app principal
+        self.pilot_id = pilot_id # NOVO: Armazena o ID do piloto (o ID da rede)
         self.config = load_config()
         self.p = pyaudio.PyAudio()
         self.sio = socketio.Client()
@@ -249,7 +266,11 @@ class RadioClient:
         """Envia a posição atual para o servidor para cálculo de degradação."""
         if self.sio.connected and lat != 0.0 and lng != 0.0:
             try:
-                self.sio.emit('update_position', {'lat': lat, 'lng': lng})
+                self.sio.emit('update_position', {
+                    'lat': lat, 
+                    'lng': lng, 
+                    'pilot_id': self.pilot_id # ADICIONADO: Envia o ID do piloto para mapeamento
+                })
             except Exception:
                 pass # Ignora erros de emissão
 
@@ -257,22 +278,36 @@ class RadioClient:
     def _on_broadcast_audio(self, data):
         if not JOYSTICK_AVAILABLE or self.p is None: return
         
+        # ADIÇÃO CRÍTICA PARA DIAGNÓSTICO E CONFIRMAÇÃO DE RECEBIMENTO
+        degradation_factor = data.get('factor', 0.0) 
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [RÁDIO RX] Áudio recebido. Fator: {degradation_factor:.4f}")
+
         # NOVO: Recebe um objeto { audio: Buffer, factor: float }
         audio_data = data.get('audio')
-        degradation_factor = data.get('factor', 0.0) 
         
+        # 1. CALCULA A DISTÂNCIA PARA EXIBIÇÃO
+        calculated_distance = reverse_degradation_factor(degradation_factor)
+        
+        # 2. ATUALIZA A DISTÂNCIA NA INTERFACE (SEGURANÇA CONTRA RACE CONDITION)
+        if self.master_app and self.master_app.current_frame:
+             current_frame = self.master_app.current_frame
+             # Checagem de segurança para garantir que o MonitorFrame está ativo
+             if hasattr(current_frame, 'update_radio_distance'): 
+                # Chama a função de atualização no thread principal (UI Thread)
+                self.master_app.after(0, lambda: current_frame.update_radio_distance(calculated_distance))
+             
         if not audio_data: return
         
         if self.stream_out and self.stream_out.is_active() and not self.is_ptt_active:
             try:
                 processed_data = audio_data 
                 
-                # 1. APLICAÇÃO DE DEGRADAÇÃO BASEADA NA DISTÂNCIA (Recebida do Server)
+                # 3. APLICAÇÃO DE DEGRADAÇÃO BASEADA NA DISTÂNCIA (Recebida do Server)
                 if degradation_factor > 0.0 and radio_dsp:
                      # O DSP aplica a degradação (ajustando voz e ruído) e o ganho final (OUTPUT_GAIN fixo)
                      processed_data = radio_dsp.apply_degradation(audio_data, RATE, degradation_factor)
                 
-                # 2. APLICA O VOLUME RX DO KNOB DA UI (Se houver degradação, é aplicado sobre o áudio degradado/reconstruído)
+                # 4. APLICA O VOLUME RX DO KNOB DA UI (Se houver degradação, é aplicado sobre o áudio degradado/reconstruído)
                 if self.rx_volume_factor != 1.0 and hasattr(np, 'frombuffer'):
                     audio_np = np.frombuffer(processed_data, dtype=np.int16)
                     audio_np = (audio_np * self.rx_volume_factor).astype(np.int16)
