@@ -48,6 +48,10 @@ class FlightEventLogger:
         self.landing_vs = None
         self.last_vs = 0.0
         self.flight_ended = True 
+        
+        # NOVO: Flag para controlar se o início de voo/táxi já foi detectado para esta instância.
+        self._flight_sequence_started = False
+
         self.event_log: List[Dict[str, Any]] = []
         self.last_alert_timestamps: Dict[str, float] = {}
 
@@ -112,15 +116,21 @@ class FlightEventLogger:
             
             # Se o avião já estiver taxiando...
             if self.has_landed and not self.is_airborne and current_gs >= GS_TAXI_START_KTS:
-                self._log_event("INICIO_VOO", f"Início de taxi detectado (no boot com movimento). GS >= {GS_TAXI_START_KTS} kts no solo.", data) 
-                self.has_landed = False 
-                self.flight_ended = False
+                # MODIFICADO: Apenas inicia o voo se esta for a primeira sequência desta instância (novo plano/logger)
+                if not self._flight_sequence_started:
+                    self._log_event("INICIO_VOO", f"Início de taxi detectado (no boot com movimento). GS >= {GS_TAXI_START_KTS} kts no solo.", data) 
+                    self.has_landed = False 
+                    self.flight_ended = False
+                    self._flight_sequence_started = True
 
         # A.2. INÍCIO DO VOO / INÍCIO DO TAXI 
         if self.initial_fuel_logged and self.has_landed and not self.is_airborne and current_on_ground == 1 and current_gs >= GS_TAXI_START_KTS:
-            self._log_event("INICIO_VOO", f"Início de taxi detectado. GS >= {GS_TAXI_START_KTS} kts no solo.", data)
-            self.has_landed = False 
-            self.flight_ended = False
+            # MODIFICADO: Apenas inicia o voo se esta for a primeira sequência desta instância (novo plano/logger)
+            if not self._flight_sequence_started:
+                self._log_event("INICIO_VOO", f"Início de taxi detectado. GS >= {GS_TAXI_START_KTS} kts no solo.", data)
+                self.has_landed = False 
+                self.flight_ended = False
+                self._flight_sequence_started = True
 
         # B. DECOLAGEM (CORRIGIDO: GS Mínimo alterado para 30 kts)
         # Condição: Não está no ar, combustível inicial registrado, altitude acima do solo > 50 pés, e velocidade > 30 kts.
@@ -155,6 +165,7 @@ class FlightEventLogger:
             self.post_full_flight_log() 
             self.is_airborne = False; self.has_landed = True; self.initial_fuel_logged = False
             self.landing_vs = None; self.last_alert_timestamps = {}
+            self._flight_sequence_started = False  # <--- ADICIONE ESTA LINHA PARA PERMITIR NOVO CICLO
             
         # H. POUSO RESET (Touch-and-Go)
         if self.initial_fuel_logged and self.has_landed and current_on_ground == 1 and current_gs >= GS_TAXI_START_KTS: 
