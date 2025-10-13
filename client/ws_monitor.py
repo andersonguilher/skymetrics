@@ -94,22 +94,22 @@ class FlightMonitor:
         """Encerra o monitor de forma segura, espera pelas threads e limpa o SimConnect globalmente."""
         self.running = False
         
-        # 1. Fecha o WebSocket (para que a thread de conexão saia)
+        # 1. Feche o WebSocket (para que a thread de conexão saia)
         if self.ws_client:
             self.ws_client.close()
         
-        # 2. Desconecta o rádio (limpeza de recursos de áudio)
+        # 2. Desconecte o rádio (limpeza de recursos de áudio)
         if self.radio_client:
              self.radio_client.disconnect()
         
-        # 3. Espera as threads de fundo
+        # 3. Espere as threads de fundo
         TIMEOUT = 1.0 
         
-        # Espera a thread de dados
+        # Espere a thread de dados
         if self.data_thread and self.data_thread.is_alive():
              self.data_thread.join(timeout=TIMEOUT) 
         
-        # Espera a thread de conexão
+        # Espere a thread de conexão
         if self.conn_thread and self.conn_thread.is_alive():
              self.conn_thread.join(timeout=TIMEOUT)
 
@@ -141,6 +141,10 @@ class FlightMonitor:
 
     def _on_open(self, ws):
         """Envia o pacote de identificação e inicia o loop de envio."""
+        
+        # [MODIFICAÇÃO APLICADA] Resetar a última frequência sintonizada para forçar a sintonia no primeiro loop de dados, 
+        # garantindo que a frequência atual da COM2 seja enviada ao servidor de rádio.
+        self.last_tuned_freq = "N/A"
         
         flight_plan = _fetch_network_flight_plan(self.vatsim_id, self.ivao_id)
         

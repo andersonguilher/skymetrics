@@ -11,7 +11,7 @@ HIGH_CUT = 3800
 
 # Amplitude do ruído branco. Ajuste este valor (0.005 a 0.05)
 # para controlar a intensidade do chiado de fundo.
-NOISE_LEVEL = 0.001
+NOISE_LEVEL = 0.0001
 
 # Fator de escala para clipping/distorção (compressão AM). Valores menores distorcem mais.
 CLIPPING_FACTOR = 0.03
