@@ -73,106 +73,60 @@ class LoginFormFrame(ttk.Frame):
 
 
 class MonitorFrame(ttk.Frame):
-    """Painel de Monitoramento Detalhado e Dinâmico."""
-    def __init__(self, master, pilot_name: str, conn_status: str, **kwargs):
+    """Painel de Monitoramento com Indicadores de Status Visuais."""
+    def __init__(self, master, pilot_name: str, **kwargs):
         super().__init__(master, padding=20, **kwargs)
-        self.pilot_name = pilot_name; self.vs_widget = None 
-        
-        # NOVO: Variável para a distância do rádio
-        self.radio_dist_var = ttk.StringVar(value="N/A") 
-        
-        self.data_vars = {
-            "alt_ind": ttk.StringVar(value="0 ft"), "vs": ttk.StringVar(value="0 fpm"), "ias": ttk.StringVar(value="0 kts"), 
-            "agl": ttk.StringVar(value="0 ft"), "g_force": ttk.StringVar(value="1.0 g"), "fuel": ttk.StringVar(value="0 gal"),
-            "com1_active": ttk.StringVar(value="N/A MHz"), 
-            "com2_active": ttk.StringVar(value="N/A MHz")  
-        }
-        
-        ttk.Label(self, text=f"Monitor de Telemetria", font=("TkDefaultFont", 12, "bold")).pack(pady=(0, 10))
-        
-        self.status_frame = ttk.Frame(self); self.status_frame.pack(fill='x', pady=5)
-        ttk.Label(self.status_frame, text=f"Piloto: {pilot_name} | SimConnect:").grid(row=0, column=0, padx=5, sticky='w')
-        self.sim_status_label = ttk.Label(self.status_frame, text=conn_status, bootstyle="info")
-        self.sim_status_label.grid(row=0, column=1, sticky='e')
-        
-        # NOVO: Exibição da Distância TX
-        self.radio_dist_frame = ttk.Frame(self); self.radio_dist_frame.pack(fill='x', pady=5)
-        ttk.Label(self.radio_dist_frame, text="Distância TX (Mock):").grid(row=0, column=0, padx=5, sticky='w')
-        ttk.Label(self.radio_dist_frame, textvariable=self.radio_dist_var, font=("-size 11 -weight bold"), bootstyle="light").grid(row=0, column=1, sticky='e')
-        self.radio_dist_frame.columnconfigure(1, weight=1)
-        
-        ttk.Separator(self).pack(fill='x', pady=5)
-        
-        self.tx_status_label = ttk.Label(self, text="AGUARDANDO SERVIDOR...", font=("TkDefaultFont", 10, "bold"), bootstyle="warning")
-        self.tx_status_label.pack(fill='x', pady=5)
-        
-        ttk.Separator(self).pack(fill='x', pady=10)
-        
-        data_frame = ttk.Frame(self); data_frame.pack(fill='both', expand=True)
-        
-        self._create_data_row(data_frame, "ALTITUDE (MSL):", "alt_ind", 0)
-        self._create_data_row(data_frame, "VS (FPM):", "vs", 1)
-        self._create_data_row(data_frame, "IAS (KTS):", "ias", 2)
-        self._create_data_row(data_frame, "AGL (FT):", "agl", 3)
-        self._create_data_row(data_frame, "G-FORCE:", "g_force", 4)
-        self._create_data_row(data_frame, "TOTAL FUEL:", "fuel", 5)
-        
-        ttk.Separator(self).pack(fill='x', pady=10) 
-        
-        self._create_data_row(data_frame, "COM1 ACTIVE:", "com1_active", 6) 
-        self._create_data_row(data_frame, "COM2 ACTIVE:", "com2_active", 7) 
-        
-        ttk.Separator(self).pack(fill='x', pady=10)
-        
-        # NOVO: Botão de Configuração do Rádio
-        ttk.Button(self, text="Rádio Configurações", command=self._show_radio_config, bootstyle="info-outline").pack(pady=(5, 5))
+        self.pilot_name = pilot_name
+        self.status_indicators: Dict[str, ttk.Frame] = {}
 
+        # --- CABEÇALHO ---
+        ttk.Label(self, text="Painel de Status", font=("TkDefaultFont", 16, "bold")).pack(pady=(0, 10))
+        ttk.Label(self, text=f"Piloto: {pilot_name}", font=("TkDefaultFont", 11)).pack(pady=(0, 15))
+        ttk.Separator(self).pack(fill='x', pady=5)
+
+        # --- FRAME DOS INDICADORES ---
+        indicators_frame = ttk.Frame(self)
+        indicators_frame.pack(fill='both', expand=True, pady=10)
+
+        # --- CRIAÇÃO DOS INDICADORES ---
+        self._create_indicator_row(indicators_frame, "SimConnect", "simconnect", 0)
+        self._create_indicator_row(indicators_frame, "Socket (Servidor)", "socket", 1)
+        self._create_indicator_row(indicators_frame, "Rádio", "radio", 2)
+        
+        ttk.Separator(indicators_frame).grid(row=3, column=0, columnspan=2, sticky='ew', pady=10)
+
+        self._create_indicator_row(indicators_frame, "Online (Rede)", "online", 4)
+        self._create_indicator_row(indicators_frame, "Motor", "motor", 5)
+        self._create_indicator_row(indicators_frame, "Táxi para decolagem", "taxi", 6)
+        self._create_indicator_row(indicators_frame, "Decolado", "decolagem", 7)
+        self._create_indicator_row(indicators_frame, "Pousado", "pouso", 8)
+        
+        # --- BOTÕES ---
+        ttk.Button(self, text="Rádio Configurações", command=self.master._show_radio_config_window, bootstyle="info-outline").pack(pady=(15, 5))
         ttk.Button(self, text="Logoff", command=master._handle_logoff, bootstyle="danger-outline").pack(pady=(5, 0))
 
-    def _show_radio_config(self):
-        """Chama a função no MainApplication para abrir a janela de configuração do rádio."""
-        self.master._show_radio_config_window() 
-
-    def _create_data_row(self, parent, label_text: str, var_key: str, row_num: int):
-        row = ttk.Frame(parent, padding=2); row.pack(fill='x')
-        ttk.Label(row, text=label_text, width=15).pack(side='left', padx=(0, 10))
-        value_widget = ttk.Label(row, textvariable=self.data_vars[var_key], font=("-size 11 -weight bold"), bootstyle="light")
-        value_widget.pack(side='right', fill='x', expand=True)
-        if var_key == "vs": self.vs_widget = value_widget
-
-
-    def update_data(self, data: Dict[str, Any]):
-        """Atualiza todas as variáveis da GUI com os novos dados."""
-        self.data_vars["alt_ind"].set(f"{int(data['alt_ind']):,} ft".replace(',', '.'))
-        self.data_vars["vs"].set(f"{int(data['vs']):,} fpm".replace(',', '.'))
-        self.data_vars["ias"].set(f"{data['ias']:.1f} kts")
-        self.data_vars["agl"].set(f"{int(data['agl']):,} ft".replace(',', '.'))
-        self.data_vars["g_force"].set(f"{data['g_force']:.1f} g")
-        self.data_vars["fuel"].set(f"{int(data['total_fuel']):,} gal".replace(',', '.'))
+    def _create_indicator_row(self, parent, label_text: str, key: str, row_num: int):
+        """Cria uma linha com um label e um indicador de status colorido."""
+        # Label
+        ttk.Label(parent, text=f"{label_text}:", font=("-size 10")).grid(row=row_num, column=0, sticky='w', padx=10, pady=5)
         
-        # Atualiza as frequências COM
-        self.data_vars["com1_active"].set(f"{data['com1_active']:.3f} MHz")
-        self.data_vars["com2_active"].set(f"{data['com2_active']:.3f} MHz")
+        # Indicador (um pequeno frame que mudará de cor)
+        indicator = ttk.Frame(parent, width=20, height=20, bootstyle="danger") # Inicia como vermelho
+        indicator.grid(row=row_num, column=1, sticky='w', padx=10)
         
-        if self.vs_widget:
-            if data['vs'] > 100:
-                self.data_vars["vs"].set(f"+{self.data_vars['vs'].get()}")
-                self.vs_widget.config(bootstyle="success")
-            elif data['vs'] < -100:
-                self.vs_widget.config(bootstyle="danger")
-            else:
-                self.vs_widget.config(bootstyle="light")
+        self.status_indicators[key] = indicator
 
+    def update_indicator(self, key: str, status: bool):
+        """
+        Atualiza a cor de um indicador de status.
+        Verde para True (ativo/conectado), Vermelho para False (inativo/desconectado).
+        """
+        if key in self.status_indicators:
+            widget = self.status_indicators[key]
+            new_style = "success" if status else "danger"
+            widget.config(bootstyle=new_style)
 
-    def update_status(self, is_transmitting: bool, message: str):
-        """Atualiza o status de transmissão."""
-        style = "success" if is_transmitting else "danger"
-        self.tx_status_label.config(text=message, bootstyle=style)
-
-    def update_sim_status(self, message: str):
-        """Atualiza o status do SimConnect."""
-        self.sim_status_label.config(text=message, bootstyle="info")
-        
-    def update_radio_distance(self, distance_km: float):
-        """NOVO: Atualiza a distância do rádio na UI."""
-        self.radio_dist_var.set(f"{distance_km:.1f} km")
+    def update_all_indicators(self, statuses: Dict[str, bool]):
+        """Atualiza todos os indicadores de uma vez a partir de um dicionário."""
+        for key, status in statuses.items():
+            self.update_indicator(key, status)
