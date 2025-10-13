@@ -49,7 +49,7 @@ class FlightEventLogger:
         self.last_vs = 0.0
         self.flight_ended = True 
         
-        # NOVO: Flag para controlar se o início de voo/táxi já foi detectado para esta instância.
+        # Flag para controlar se o início de voo/táxi já foi detectado para esta instância.
         self._flight_sequence_started = False
 
         self.event_log: List[Dict[str, Any]] = []
@@ -80,6 +80,7 @@ class FlightEventLogger:
                 "lat": lat_string,
                 "lng": lng_string,
                 "descricao": description,
+                "valor": 0, # <--- CORREÇÃO 1: Inicializa 'valor' para 0
             }
 
             safe_total_fuel = snapshot.get('total_fuel', 0.0)
@@ -87,9 +88,11 @@ class FlightEventLogger:
             if event_name == 'VS_NO_TOQUE':
                 vs_value = snapshot.get('landing_vs', 0.0) 
                 log_entry['landing_vs'] = int(vs_value)
+                log_entry['valor'] = int(vs_value) # <--- CORREÇÃO 2: Popula 'valor' com VS
                 
             elif event_name in ('COMBUSTIVEL_INICIAL', 'COMBUSTIVEL_FINAL'):
                 log_entry['total_fuel'] = int(safe_total_fuel) 
+                log_entry['valor'] = int(safe_total_fuel) # <--- CORREÇÃO 3: Popula 'valor' com Combustível
                 
             self.event_log.append(log_entry)
 
@@ -165,7 +168,7 @@ class FlightEventLogger:
             self.post_full_flight_log() 
             self.is_airborne = False; self.has_landed = True; self.initial_fuel_logged = False
             self.landing_vs = None; self.last_alert_timestamps = {}
-            self._flight_sequence_started = False  # <--- ADICIONE ESTA LINHA PARA PERMITIR NOVO CICLO
+            self._flight_sequence_started = False 
             
         # H. POUSO RESET (Touch-and-Go)
         if self.initial_fuel_logged and self.has_landed and current_on_ground == 1 and current_gs >= GS_TAXI_START_KTS: 
