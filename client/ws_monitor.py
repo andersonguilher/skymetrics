@@ -197,21 +197,32 @@ class FlightMonitor:
                 fetch_all_data()
                 current_rounded = create_rounded_data(flight_data)
                 
-                # --- BLOCO REATIVO: INICIALIZAÇÃO DO RÁDIO E UI ---
+                # --- BLOCO REATIVO: GERENCIAMENTO DE ESTADO DO RÁDIO ---
                 if CONN_STATUS == "REAL":
                     # ATUALIZA O STATUS DO SIMCONNECT NA UI PARA "REAL"
                     self.master_app.after(0, self.master_app.current_frame.update_sim_status, "REAL") 
 
                     if self.radio_client is None:
-                         # Tenta inicializar o rádio se SimConnect estiver REAL e o rádio INATIVO
-                         try:
-                             print(f"[{datetime.now().strftime('%H:%M:%S')}] [RÁDIO INFO] SimConnect REAL detectado. Tentando instanciar RadioClient...")
-                             # REVERTIDO: Chamada sem argumento
-                             self.radio_client = RadioClient() 
-                             self.radio_client.connect()
-                             print(f"[{datetime.now().strftime('%H:%M:%S')}] [RÁDIO INFO] Cliente de rádio inicializado e conectando automaticamente.")
-                         except Exception as e:
-                             print(f"[{datetime.now().strftime('%H:%M:%S')}] [RÁDIO CRÍTICO] Falha ao instanciar/conectar RadioClient: {e}. O rádio está desativado.")
+                        # Tenta instanciar e conectar o rádio
+                        try:
+                            print(f"[{datetime.now().strftime('%H:%M:%S')}] [RÁDIO INFO] SimConnect REAL detectado. Tentando instanciar RadioClient...")
+                            
+                            self.radio_client = RadioClient() 
+                            
+                            # Se o PyAudio/PyGame falhou na inicialização (radio_ui_logic.py), self.p será None.
+                            if self.radio_client.p is not None:
+                                self.radio_client.connect()
+                                print(f"[{datetime.now().strftime('%H:%M:%S')}] [RÁDIO INFO] Cliente de rádio inicializado e conectando automaticamente.")
+                            else:
+                                # Se a inicialização de dependências falhou, descartamos o cliente e informamos na UI.
+                                self.radio_client = None
+                                self.master_app.after(0, self.master_app.current_frame.update_status, False, "RÁDIO DESATIVADO (Dependência)")
+
+                        except Exception as e:
+                            # Captura erros de thread, memória, ou outros erros críticos na inicialização.
+                            self.radio_client = None
+                            self.master_app.after(0, self.master_app.current_frame.update_status, False, "RÁDIO FALHOU (Instância)")
+                            print(f"[{datetime.now().strftime('%H:%M:%S')}] [RÁDIO CRÍTICO] Falha crítica ao instanciar RadioClient: {e}. Desativando o rádio.")
                 else:
                     # Se o status for SIMULADO (o estado padrão ou após desconexão), atualiza a UI
                     self.master_app.after(0, self.master_app.current_frame.update_sim_status, "SIMULADO") 
@@ -221,20 +232,32 @@ class FlightMonitor:
                         self.radio_client.disconnect()
                         self.radio_client = None
                         
-                # 2. SINTONIZAR O RÁDIO
-                if self.radio_client and current_rounded.get('com1_active', 0.0) != 0.0:
-                    com1_freq = current_rounded['com1_active']
-                    new_freq_str = f"{com1_freq:.3f}"
-                    
-                    if new_freq_str != self.last_tuned_freq:
-                        self.radio_client.tune_frequency(new_freq_str)
-                        self.last_tuned_freq = new_freq_str 
-                
-                # Enviar posição para o Servidor de Rádio
+                # 2. SINTONIZAR O RÁDIO E ENVIAR POSIÇÃO (BLOCO TRY/EXCEPT DE USO)
                 if self.radio_client:
-                    lat = current_rounded.get('lat', 0.0)
-                    lng = current_rounded.get('lng', 0.0)
-                    self.radio_client.send_position(lat, lng)
+                    try:
+                        # SINTONIZAR: AGORA SINTONIZA NA COM2 (Prioriza COM2)
+                        com2_freq = current_rounded.get('com2_active', 0.0) # <--- ALTERADO PARA COM2
+                        
+                        if com2_freq != 0.0:
+                            new_freq_str = f"{com2_freq:.3f}"
+                            
+                            # Verifica se a frequência é válida e diferente da última sintonizada
+                            if new_freq_str != self.last_tuned_freq:
+                                self.radio_client.tune_frequency(new_freq_str)
+                                self.last_tuned_freq = new_freq_str 
+                        
+                        # ENVIAR POSIÇÃO
+                        lat = current_rounded.get('lat', 0.0)
+                        lng = current_rounded.get('lng', 0.0)
+                        self.radio_client.send_position(lat, lng)
+
+                    except Exception as e:
+                         # Erro de uso do rádio (e.g., erro de socket na conexão ou stream)
+                         print(f"[{datetime.now().strftime('%H:%M:%S')}] [RÁDIO CRÍTICO] Erro durante o uso do RadioClient: {e}. Desconectando o rádio.")
+                         # Desconecta e descarta para forçar a re-inicialização
+                         self.radio_client.disconnect()
+                         self.radio_client = None 
+                         self.master_app.after(0, self.master_app.current_frame.update_status, False, "RÁDIO FALHOU (Uso)")
                 # --- FIM DO BLOCO REATIVO ---
 
                 # 3. ATUALIZAR UI LOCAL (Sempre)

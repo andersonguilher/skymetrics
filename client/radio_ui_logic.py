@@ -196,7 +196,9 @@ class RadioClient:
         self.p = pyaudio.PyAudio()
         self.sio = socketio.Client()
         self.is_ptt_active = False
-        self.current_frequency = self.config.get('last_freq', '122.800')
+        # ALTERADO: Remove a dependência de 'last_freq' do config, pois a frequência inicial 
+        # será enviada pelo monitor (com2_active do simulador).
+        self.current_frequency = 'N/A' 
         self.stream_in = None
         self.stream_out = None
         self.joystick_thread = None
@@ -230,7 +232,8 @@ class RadioClient:
 
     def _on_connect(self):
         print("--- CONECTADO ao Servidor de Rádio ---")
-        self.sio.emit('change_frequency', self.current_frequency)
+        # REMOVIDO: Não emite mais a frequência inicial aqui. O ws_monitor fará isso com os dados do simulador.
+        # self.sio.emit('change_frequency', self.current_frequency)
         if JOYSTICK_AVAILABLE:
             self.set_ptt_hotkeys(self.ptt_key, True)
             self.start_joystick_monitor()
@@ -420,7 +423,10 @@ class RadioClient:
                 # 4. Envia o chunk processado (volume 1.0) ao servidor
                 self.sio.emit('audio_chunk', processed_audio_data)
                 
-            except Exception:
+            except Exception as e:
+                # CORREÇÃO: Trata a exceção e limpa os streams antes de quebrar o loop.
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] [RÁDIO CRÍTICO] Falha no thread de transmissão: {e}. Executando stop_transmission().")
+                self.stop_transmission() 
                 break
             
             time.sleep(CHUNK / RATE / 2) 
@@ -557,7 +563,7 @@ class RadioClient:
         if not self.is_listening_for_ptt:
             return
 
-        self.is_listening_for_ptt = False
+        self.client.is_listening_for_ptt = False
         
         if captured_key:
             new_key = captured_key.lower()
@@ -565,12 +571,12 @@ class RadioClient:
             new_key = self.ptt_key
 
         # 1. Atualiza a configuração do cliente
-        self.ptt_key = new_key
-        self.config['ptt_key'] = new_key
-        save_config(self.config)
+        self.client.ptt_key = new_key
+        self.client.config['ptt_key'] = new_key
+        save_config(self.client.config)
         
         # 3. Re-registra os hotkeys
-        self.set_ptt_hotkeys(new_key, True)
+        self.client.set_ptt_hotkeys(new_key, True)
         
         # 4. Força a atualização da UI (o objeto da janela de configurações precisa ser atualizado)
         # É uma simulação da chamada que o objeto RadioConfigWindow faria.
