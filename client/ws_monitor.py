@@ -275,13 +275,16 @@ class FlightMonitor:
                 self.master_app.after(0, self.master_app.current_frame.update_data, current_rounded)
                 self.master_app.after(0, self.master_app.current_frame.update_sim_status, CONN_STATUS)
 
+                # --- INÍCIO DA CORREÇÃO ---
+                # A lógica de eventos agora é executada independentemente do estado de transmissão.
+                if self.event_logger:
+                    self.event_logger.check_and_log_events(current_rounded) 
+                # --- FIM DA CORREÇÃO ---
+
                 # A telemetria é enviada apenas se o servidor permitir (self.transmitting é True após START_TX)
                 if not self.transmitting:
                     time.sleep(0.1)
                     continue 
-
-                if self.event_logger:
-                    self.event_logger.check_and_log_events(current_rounded) 
 
                 force_send = (time.time() - self.last_send_time) >= self.heartbeat_interval
                 if has_significant_change(current_rounded, self.last_sent_data) or force_send:
