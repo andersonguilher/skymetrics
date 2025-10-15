@@ -292,9 +292,7 @@ class MainApplication(ttk.Window):
         self.title(f"Monitor de Voo {VA_KEY} - Piloto: {display_name}")
         self.monitor = FlightMonitor(email, display_name, pilot_data, self, WEBSOCKET_URL, HEARTBEAT_INTERVAL)
         self.monitor.start_monitor()
-        # --- CORREÇÃO AQUI ---
-        monitor_frame = MonitorFrame(self, display_name)
-        # --- FIM DA CORREÇÃO ---
+        monitor_frame = MonitorFrame(self, display_name, CONN_STATUS)
         monitor_frame.pack(fill=BOTH, expand=YES); self.current_frame = monitor_frame
         self.after(500, self._start_tray_icon)
 
