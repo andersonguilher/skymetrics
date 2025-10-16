@@ -1,12 +1,30 @@
-// server.js (CORRIGIDO com Lógica de Distância Implementada e Rota de Estatísticas)
+// server.js (CORRIGIDO com HTTPS, WSS e Lógica de Distância)
 
 const express = require('express');
-const http = require('http');
+const https = require('https'); // MUDANÇA: Usando 'https'
+const fs = require('fs'); // Necessário para ler os arquivos de certificado
 const { Server } = require('socket.io');
 
 const app = express();
-const server = http.createServer(app);
 
+const PORT = 3000;
+const HOST = '0.0.0.0';
+const DEFAULT_FREQUENCY = '121.5';
+
+// --- CONFIGURAÇÃO SSL/TLS CORRETA PARA O KAFLLY.COM.BR ---
+// ATENÇÃO: Verifique as permissões de leitura! Pode ser necessário rodar com 'sudo'.
+const options = {
+    // Chave Privada
+    key: fs.readFileSync('/var/www/httpd-cert/kafly.com.br_2025-05-31-13-48_35.key'),
+    // Certificado Completo (inclui a cadeia)
+    cert: fs.readFileSync('/var/www/httpd-cert/kafly.com.br_2025-05-31-13-48_35.crt')
+};
+// --------------------------------------------------------
+
+// MUDANÇA: Cria o servidor HTTPS passando as 'options' SSL
+const server = https.createServer(options, app);
+
+// O Socket.IO agora usará o servidor HTTPS para obter conexões seguras WSS
 const io = new Server(server, {
     cors: {
         origin: "*",
@@ -14,11 +32,7 @@ const io = new Server(server, {
     }
 });
 
-const PORT = 3000;
-const HOST = '0.0.0.0';
-const DEFAULT_FREQUENCY = '121.5';
-
-// --- ESTADO GLOBAL E CONSTANTES DE ALCANCE (Sincronizadas com o cliente Python) ---
+// --- ESTADO GLOBAL E CONSTANTES DE ALCANCE ---
 const PILOT_POSITIONS = {}; // { pilot_id: { lat: number, lng: number, socket_id: string, currentFrequency: string } }
 const MAX_RANGE_KM = 4000.0;
 const MIN_RANGE_KM = 5.0;
@@ -62,12 +76,9 @@ function calculateDegradationFactor(distanceKm) {
     return (distanceKm - MIN_RANGE_KM) / (MAX_RANGE_KM - MIN_RANGE_KM);
 }
 
-// --- ROTA DE ESTATÍSTICAS (http://HOST:PORT/skymetrics) ---
-// Rota ajustada para ser o caminho base da aplicação web.
+// --- ROTA DE ESTATÍSTICAS (https://HOST:PORT/skymetrics) ---
 app.get('/skymetrics', (req, res) => {
-    // io.engine.clientsCount conta todas as conexões (incluindo as não totalmente inicializadas)
     const totalConnections = io.engine.clientsCount;
-    // Conta apenas os clientes que enviaram o 'update_position' com o pilot_id
     const activePilots = Object.keys(PILOT_POSITIONS).length;
 
     let tableRows = '';
@@ -219,6 +230,7 @@ io.on('connection', (socket) => {
                 }
 
                 if (!receiverPosition) {
+                    // Se o receptor ainda não enviou posição, envia com degradação zero.
                     const payload = { audio: data, factor: 0.0 };
                     receiverSocket.emit('broadcast_audio', payload);
                     return;
@@ -264,7 +276,9 @@ io.on('connection', (socket) => {
 
 // Inicia o servidor Node.js
 server.listen(PORT, HOST, () => {
-    console.log(`Servidor Socket.IO de Rádio rodando em http://${HOST}:${PORT}`);
+    // MUDANÇA: Logs agora mostram conexões HTTPS/WSS
+    console.log(`Servidor Socket.IO de Rádio rodando em https://${HOST}:${PORT}`);
     // URL que reflete a estrutura do diretório
-    console.log(`Estatísticas disponíveis em: http://${HOST}:${PORT}/skymetrics`);
+    console.log(`Estatísticas disponíveis em: https://${HOST}:${PORT}/skymetrics`);
+    console.log(`O Socket.IO agora usa o protocolo WSS (WebSocket Seguro).`);
 });
