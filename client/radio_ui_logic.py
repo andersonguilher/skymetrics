@@ -46,7 +46,7 @@ except Exception as e:
 
 # --- CONSTANTES DE CONFIGURAÇÃO ---
 CONFIG_FILE = 'client_config.json'
-DEFAULT_SERVER_URL = 'http://www.kafly.com.br:3000'
+DEFAULT_SERVER_URL = 'https://www.kafly.com.br:3000' # CORRIGIDO PARA CONEXÃO SEGURA
 PTT_KEY_DEFAULT = 'space'
 
 # --- Configurações de Áudio (Herdadas do projeto rádio) ---
